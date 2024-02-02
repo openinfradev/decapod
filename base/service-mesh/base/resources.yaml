@@ -1,0 +1,750 @@
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: cert-manager
+  name: cert-manager
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: cert-manager
+    version: v1.11.0
+    origin: https://charts.jetstack.io
+  releaseName: cert-manager
+  targetNamespace: tks-msa
+  values:
+    installCRDs: true
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: k8ssandra-operator-crds
+  name: k8ssandra-operator-crds
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: k8ssandra-operator
+    version: 1.6.0
+    origin: https://helm.k8ssandra.io/stable
+  releaseName: k8ssandra-operator-crds
+  targetNamespace: tks-msa
+  values: {}
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: k8ssandra-operator
+  name: k8ssandra-operator
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: k8ssandra-operator
+    version: 1.6.0
+    origin: https://helm.k8ssandra.io/stable
+  releaseName: k8ssandra-operator
+  targetNamespace: tks-msa
+  values:
+    cleaner:
+      image:
+        registry: harbor.taco-cat.xyz
+        repository: tks/k8ssandra-tools
+        tag: latest
+    client:
+      image:
+        registry: harbor.taco-cat.xyz
+        repository: tks/k8ssandra-tools
+        tag: latest
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: servicemesh-k8ssandra-resource
+  name: servicemesh-k8ssandra-resource
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: servicemesh-k8ssandra-resource
+    version: 1.6.0
+    origin: https://helm.k8ssandra.io/stable
+  releaseName: servicemesh-k8ssandra-resource
+  targetNamespace: tks-msa
+  values:
+    fullName: cassandra
+    namespace: tks-msa
+    cassandra:
+      serverVersion: 4.0.6
+      clusterName: cassandra
+      telemetry:
+        prometheus:
+          enabled: true
+      jmxInitContainerImage:
+        name: busybox
+        registry: harbor.taco-cat.xyz/tks
+        tag: 1.34.1
+      datacenters:
+        name: dc
+        size: 2
+        perNodeConfigInitContainerImage: harbor.taco-cat.xyz/tks/yq:4
+        initContainers:
+          serverConfigInitImage: harbor.taco-cat.xyz/tks/cass-config-builder:1.0-ubi7
+        jmxInitContainerImage:
+          name: busybox
+          registry: harbor.taco-cat.xyz/tks
+          tag: 1.34.1
+        containers:
+        - name: cassandra
+          image: harbor.taco-cat.xyz/tks/cass-management-api:4.0.6
+        - name: server-system-logger
+          image: harbor.taco-cat.xyz/tks/system-logger:v1.14.0
+        config:
+          heapSize: 2048M
+        storageConfig:
+          storageClassName: taco-storage
+          accessModes: ReadWriteOnce
+          size: 300Gi
+        racks:
+          name: tks
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                - matchExpressions:
+                  - key: tks-msa
+                    operator: In
+                    values:
+                    - enabled
+        stargate:
+          size: 1
+          heapSize: 384M
+          cassandraConfigMapRef:
+            name: cassandra-config
+          allowStargateOnDataNodes: true
+          telemetry:
+            prometheus:
+              enabled: true
+          containerImage:
+            registry: harbor.taco-cat.xyz
+            repository: tks
+            tag: v1.0.67
+          nodeSelector:
+            tks-msa: enabled
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: istio-base
+  name: istio-base
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: istio-base
+    version: 1.17.2
+    origin: https://istio-release.storage.googleapis.com/charts
+  releaseName: istio-base
+  targetNamespace: tks-msa
+  values:
+    global:
+      istioNamespace: tks-msa
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: istio-base-crds
+  name: istio-base-crds
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: istio-base
+    version: 1.17.2
+    origin: https://istio-release.storage.googleapis.com/charts
+  releaseName: istio-base-crds
+  targetNamespace: tks-msa
+  values:
+    global:
+      istioNamespace: tks-msa
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: istiod
+  name: istiod
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: istiod
+    version: 1.17.2
+    origin: https://istio-release.storage.googleapis.com/charts
+  releaseName: istiod
+  targetNamespace: tks-msa
+  values:
+    pilot:
+      image: harbor.taco-cat.xyz/tks/pilot:1.17.2
+      traceSampling: 1.0
+      resources:
+        requests:
+          cpu: 500m
+          memory: 2048Mi
+      nodeSelector:
+        tks-msa: enabled
+    revision: ""
+    global:
+      istioNamespace: tks-msa
+      defaultResources:
+        requests:
+          cpu: 10m
+          memory: 128Mi
+        limits:
+          cpu: 2000m
+          memory: 1024Mi
+      hub: harbor.taco-cat.xyz/tks
+      tag: 1.17.2
+      proxy:
+        image: proxyv2
+        autoInject: enabled
+        clusterDomain: "cluster.local"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 2000m
+            memory: 1024Mi
+        tracer: "zipkin"
+      tracer:
+        zipkin:
+          address: "jaeger-operator-jaeger-collector.tks-msa:9411"
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: istio-ingressgateway
+  name: istio-ingressgateway
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: istio-gateway
+    version: 1.17.2
+    origin: https://istio-release.storage.googleapis.com/charts
+  releaseName: istio-ingressgateway
+  targetNamespace: tks-gateway
+  values:
+    revision: ""
+    replicaCount: 1
+    image: harbor.taco-cat.xyz/tks/proxyv2:1.17.2
+    service:
+      type: LoadBalancer
+      ports:
+      - name: status-port
+        port: 15021
+        protocol: TCP
+        targetPort: 15021
+      - name: http2
+        port: 80
+        protocol: TCP
+        targetPort: 80
+      - name: https
+        port: 443
+        protocol: TCP
+        targetPort: 443
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 1024Mi
+      limits:
+        cpu: 2000m
+        memory: 2048Mi
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 5
+      targetCPUUtilizationPercentage: 80
+    labels:
+      app: istio-ingressgateway
+    nodeSelector:
+      tks-ingressgateway: enabled
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: istio-ingressgateway
+          topologyKey: "kubernetes.io/hostname"
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: istio-egressgateway
+  name: istio-egressgateway
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: istio-gateway
+    version: 1.17.2
+    origin: https://istio-release.storage.googleapis.com/charts
+  releaseName: istio-egressgateway
+  targetNamespace: tks-gateway
+  values:
+    revision: ""
+    replicaCount: 1
+    image: harbor.taco-cat.xyz/tks/proxyv2:1.17.2
+    service:
+      type: ClusterIP
+      ports:
+      - name: status-port
+        port: 15021
+        protocol: TCP
+        targetPort: 15021
+      - name: http2
+        port: 80
+        protocol: TCP
+        targetPort: 80
+      - name: https
+        port: 443
+        protocol: TCP
+        targetPort: 443
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 1024Mi
+      limits:
+        cpu: 2000m
+        memory: 2048Mi
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 5
+      targetCPUUtilizationPercentage: 80
+    labels:
+      app: istio-egressgateway
+    nodeSelector:
+      tks-egressgateway: enabled
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: istio-egressgateway
+          topologyKey: "kubernetes.io/hostname"
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: jaeger-operator-crds
+  name: jaeger-operator-crds
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: jaeger-operator
+    version: 2.33.0
+    origin: https://jaegertracing.github.io/helm-charts
+  releaseName: jaeger-operator-crds
+  targetNamespace: tks-msa
+  values: {}
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: jaeger-operator
+  name: jaeger-operator
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    version: 2.33.0
+    name: jaeger-operator
+    origin: https://jaegertracing.github.io/helm-charts
+  releaseName: jaeger-operator
+  targetNamespace: tks-msa
+  values:
+    image:
+      repository: harbor.taco-cat.xyz/tks/jaeger-operator
+      tag: 1.35.0
+    jaeger:
+      create: false
+      namespace: tks-msa
+    rbac:
+      create: true
+      clusterRole: true
+    nodeSelector:
+      tks-msa: enabled
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: servicemesh-jaeger-resource
+  name: servicemesh-jaeger-resource
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: servicemesh-jaeger-resource
+    version: 2.33.0
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: servicemesh-jaeger-resource
+  targetNamespace: tks-msa
+  values:
+    namespace: tks-msa
+    strategy: production
+    sampling:
+      param: 100
+    ingress:
+      enabled: false
+    collector:
+      image: harbor.taco-cat.xyz/tks/jaeger-collector:1.35.0
+      maxReplicas: 5
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+        limits:
+          cpu: 1000m
+          memory: 2Gi
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: tks-msa
+                operator: In
+                values:
+                - enabled
+    storage:
+      type: cassandra
+      cassandra:
+        options:
+          servers: cassandra-dc-service.tks-msa.svc
+          keyspace: jaeger_v1_datacenter
+        cassandraCreateSchema:
+          image: harbor.taco-cat.xyz/tks/jaeger-cassandra-schema:1.35.0
+          datacenter: "dc"
+          mode: "prod"
+          timeout: "3m"
+        dependencies:
+          enabled: true
+          image: harbor.taco-cat.xyz/tks/spark-dependencies:1.35.0
+      elastic:
+        esIndexCleaner:
+          enabled: true
+          image: jaegertracing/jaeger-es-index-cleaner:1.29.0
+          numberOfDays: 7
+          schedule: "55 04 * * *"
+        options:
+          indexPrefix: jaeger
+          username: elastic
+          password: tacoword
+          tlsCa: /etc/ssl/certs/tls.crt
+          serverUrls: https://eck-elasticsearch-es-http.istio-system.svc:9200
+          secretName: eck-elasticsearch-es-http-certs-public
+    query:
+      image: harbor.taco-cat.xyz/tks/jaeger-query:1.35.0
+      basePath: /
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: tks-msa
+                operator: In
+                values:
+                - enabled
+    agent:
+      image: harbor.taco-cat.xyz/tks/jaeger-agent:1.35.0
+    cassandra:
+      user:
+        enabled: true
+        username: tks
+        password: tksword
+      image: harbor.taco-cat.xyz/tks/shyaml_jq_kubectl_python:3.11
+      imagePullPolicy: IfNotPresent
+      passwordSecret: cassandra-superuser
+      nodeSelector:
+        tks-msa: enabled
+    elasticsearch:
+      image:
+        repository: harbor.taco-cat.xyz/tks/nginx-unprivileged
+        tag: 1.19-alpine
+        pullPolicy: IfNotPresent
+      host: eck-elasticsearch-es-http.lma.svc.cluster.local
+      port: 9200
+      elasticPasswordSecret: eck-elasticsearch-es-elastic-user
+      user:
+        enabled: true
+        username: taco-jaeger
+        password: tacoword
+      nodeSelector:
+        tks-msa: enabled
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: kiali-operator-crds
+  name: kiali-operator-crds
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: kiali-operator
+    version: 1.63.0
+    origin: https://kiali.org/helm-charts
+  releaseName: kiali-operator-crds
+  targetNamespace: tks-msa
+  values: {}
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: kiali-operator
+  name: kiali-operator
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: kiali-operator
+    version: 1.63.0
+    origin: https://kiali.org/helm-charts
+  releaseName: kiali-operator
+  targetNamespace: tks-msa
+  values:
+    image:
+      repo: harbor.taco-cat.xyz/tks/kiali-operator
+      tag: v1.63.0
+    allowAdHocKialiImage: true
+    nodeSelector:
+      tks-msa: enabled
+    resources:
+      requests:
+        cpu: "10m"
+        memory: "64Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    cr:
+      create: false
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: servicemesh-kiali-resource
+  name: servicemesh-kiali-resource
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: servicemesh-kiali-resource
+    version: 1.63.0
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: servicemesh-kiali-resource
+  targetNamespace: tks-msa
+  values:
+    namespace: tks-msa
+    istioNamespace: tks-msa
+    deployment:
+      ingress:
+        enabled: false
+      namespace: tks-msa
+      image_name: harbor.taco-cat.xyz/tks/kiali
+      image_version: v1.63.0
+      replicas: 1
+      resources:
+        requests:
+          cpu: 500m
+          memory: 512Mi
+        limits:
+          cpu: 1000m
+          memory: 1024Mi
+      nodeSelector:
+        tks-msa: enabled
+      serviceType: ClusterIP
+      additionalServiceYaml:
+        nodePort: 30010
+    auth:
+      strategy: anonymous
+    externalServices:
+      customDashboards:
+        enabled: true
+      istio:
+        configMapName: istio
+        istioIdentityDomain: svc.cluster.local
+        componentStatus:
+          enabled: true
+          components:
+            istiodLabel: istiod
+            ingressGatewayLabel: istio-ingressgateway
+            egressGatewayLabel: istio-egressgateway
+      prometheus:
+        url: http://lma-prometheus.lma.svc:9090
+      tracing:
+        enabled: true
+        namespaceSelector: true
+        inClusterUrl: http://jaeger-operator-jaeger-query.tks-msa:16686
+        url: https://jaeger-v2.taco-cat.xyz
+        useGrpc: false
+      grafana:
+        auth:
+          password: password
+          type: basic
+          useKialiToken: false
+          username: admin
+        enabled: true
+        inClusterUrl: http://grafana.lma.svc:3000
+        url: https://grafana-v2.taco-cat.xyz
+    server:
+      metricsEnabled: true
+      metricsPort: 9090
+      port: 20001
+      webRoot: /kiali
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: servicemesh-grafana-dashboard
+  name: servicemesh-grafana-dashboard
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: servicemesh-grafana-dashboard
+    version: 1.13.1
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: servicemesh-grafana-dashboard
+  targetNamespace: tks-msa
+  values:
+    namespace: tks-msa
+    dashboards:
+      label: grafana_dashboard
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: servicemesh-prometheusmonitor
+  name: servicemesh-prometheusmonitor
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: servicemesh-prometheusmonitor
+    version: 1.7.0
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: servicemesh-prometheusmonitor
+  targetNamespace: tks-msa
+  values:
+    namespace: tks-msa
+    istio:
+      interval: "15s"
+    jaeger:
+      interval: "15s"
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: servicemesh-prometheusrule
+  name: servicemesh-prometheusrule
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: servicemesh-prometheusrule
+    version: 1.7.0
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: servicemesh-prometheusrule
+  targetNamespace: tks-msa
+  values:
+    namespace: tks-msa
+    aggregation:
+      interval: "5s"
+    optimization:
+      interval: "5s"
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: gatekeeper
+  name: gatekeeper
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: gatekeeper
+    version: 0.1.39
+    origin: https://gogatekeeper.github.io/helm-gogatekeeper
+  releaseName: gatekeeper
+  targetNamespace: tks-msa
+  values:
+    image:
+      registry: harbor.taco-cat.xyz
+      repository: tks/gatekeeper
+    service:
+      type: LoadBalancer
+    config:
+      discovery-url: https://tks-console-dev.taco-cat.xyz/auth/realms/organization
+      upstream-url: http://jaeger-operator-jaeger-query.tks-msa.svc:16686
+      client-id: gatekeeper-jaeger
+      client-secret: secret
+  wait: true
+

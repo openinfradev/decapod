@@ -1,0 +1,162 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: remove-lma-federation
+  namespace: argo
+spec:
+  entrypoint: process
+  arguments:
+    parameters:
+    # 'cluster_id' is used for multi-cluster case
+    # TODO: better to rename this to 'site_name' later
+    - name: cluster_id
+      value: ""
+    - name: app_prefix
+      value: ""
+    # Filter to filter argocd apps
+    - name: filter
+      value: "app=lma"
+  templates:
+  - name: process
+    steps:
+    - - name: disableAutoSync
+        template: disableAutoSync
+
+    # Delete CRs first so that it doesn't hang
+    # due to earlier service-account deletion #
+    - - name: removePrometheusCR
+        template: removePrometheusCR
+        arguments:
+          parameters:
+          - name: namespace
+            value:  "lma"
+
+    # This is for EFK option
+    - - name: removeFluentbitCR
+        template: removeFluentbitCR
+        arguments:
+          parameters:
+          - name: namespace
+            value:  "lma"
+
+    # Remove argo CD apps
+    - - name: removeLMA
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByLabel
+
+    # Cleanup secrets and PVCs
+    - - name: cleanupLeftoverResources
+        template: removeLeftoverResources
+        arguments:
+          parameters:
+          - name: namespace
+            value:  "lma"
+
+  #######################
+  # Template Definition #
+  #######################
+
+  - name: disableAutoSync
+    container:
+      name: disable-auto-sync
+      image: harbor.taco-cat.xyz/tks/argocd-cli:v2.2.5
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          # Login to Argo CD server
+          ./argocd login $ARGO_SERVER --plaintext --insecure --username $ARGO_USERNAME \
+          --password $ARGO_PASSWORD
+
+          app_list=$(./argocd app list -l {{workflow.parameters.filter}} --output name)
+          echo -e "app list:\n $app_list"
+          if [[ $? -eq 0 && -n $app_list ]]; then
+            # Disable auto-sync
+            echo "Disabling auto-sync of LMA app_group.."
+            echo "$app_list" | xargs -I '{}' ./argocd app set '{}' --sync-policy none
+          fi
+      envFrom:
+        - secretRef:
+            name: "decapod-argocd-config"
+
+  - name: removePrometheusCR
+    inputs:
+      parameters:
+        - name: namespace
+    container:
+      name: remove-prometheus-cr
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          echo "Deleting prometheus CRs..."
+
+          CLUSTER_ID={{workflow.parameters.cluster_id}}
+          kube_params=""
+
+          if [[ -n "{{workflow.parameters.cluster_id}}" ]]; then
+            kube_secret=$(kubectl get secret -n ${CLUSTER_ID} ${CLUSTER_ID}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+            echo -e "kube_secret:\n$kube_secret" | head -n 5
+            cat <<< "$kube_secret" > /etc/kubeconfig
+
+            kube_params+="--kubeconfig=/etc/kubeconfig"
+          fi
+
+          kubectl $kube_params delete prometheus --all -n {{inputs.parameters.namespace}}
+          kubectl $kube_params delete alertmanager --all -n {{inputs.parameters.namespace}}
+
+  - name: removeFluentbitCR
+    inputs:
+      parameters:
+        - name: namespace
+    container:
+      name: remove-fluentbit-cr
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          echo "Deleting fluentbit CR..."
+
+          CLUSTER_ID={{workflow.parameters.cluster_id}}
+          kube_params=""
+
+          if [[ -n "{{workflow.parameters.cluster_id}}" ]]; then
+            kube_secret=$(kubectl get secret -n ${CLUSTER_ID} ${CLUSTER_ID}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+            echo -e "kube_secret:\n$kube_secret" | head -n 5
+            cat <<< "$kube_secret" > /etc/kubeconfig
+
+            kube_params+="--kubeconfig=/etc/kubeconfig"
+          fi
+          
+          for fbcr in ClusterInput ClusterOutput ClusterFilter ClusterParser ClusterFluentBitConfig FluentBit
+          do
+            kubectl $kube_params delete ${fbcr} --all -n {{inputs.parameters.namespace}} || true
+          done
+
+  - name: removeLeftoverResources
+    inputs:
+      parameters:
+        - name: namespace
+    container:
+      name: remove-leftover
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          echo "Deleting secrets and PVCs..."
+
+          CLUSTER_ID={{workflow.parameters.cluster_id}}
+          kube_params=""
+          if [[ -n "{{workflow.parameters.cluster_id}}" ]]; then
+            kube_secret=$(kubectl get secret -n ${CLUSTER_ID} ${CLUSTER_ID}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+            cat <<< "$kube_secret" > /etc/kubeconfig
+
+            kube_params+="--kubeconfig=/etc/kubeconfig"
+          fi
+
+          kubectl $kube_params delete secret etcd-client-cert prometheus-operator-admission -n {{inputs.parameters.namespace}} || true
+          kubectl $kube_params delete pvc --all -n {{inputs.parameters.namespace}}

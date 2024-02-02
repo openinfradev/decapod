@@ -1,0 +1,280 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: service-mesh
+  namespace: argo
+spec:
+  entrypoint: deploy-start
+  arguments:
+    parameters:
+    - name: site_name
+      value: decapod-reference
+    - name: manifest_repo_url
+      value: 'https://github.com/openinfradev/decapod-manifests'
+    - name: revision
+      value: main
+    - name: cluster_id
+      value: ""
+    - name: app_prefix
+      value: ""
+
+  templates:
+  #=========================================================
+  # Template Pipeline
+  #=========================================================
+  - name: deploy-start
+    steps:
+    - - name: create-namespace-list
+        template: create-namespace-list
+        arguments:
+          parameters:
+          - name: list
+            value: |
+              [
+                { "namespace": "tks-msa", "label": "name=lma,taco-tls=enabled" },
+                { "namespace": "tks-gateway", "label": "name=lma,taco-tls=enabled" }
+              ]
+
+    - - name: deploy
+        template: deploy
+
+    - - name: sync-app
+        template: sync-app
+
+  #=========================================================
+  # Template Definition
+  #=========================================================
+  - name: deploy
+    dag:
+      tasks:
+      - name: cert-manager
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+          - name: list
+            value: |
+              [
+                { "app_group": "service-mesh", "path": "cert-manager", "namespace": "tks-msa", "target_cluster": "" }
+              ]
+
+      - name: k8ssandra-operator
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+          - name: list
+            value: |
+              [
+                { "app_group": "service-mesh", "path": "k8ssandra-operator-crds", "namespace": "tks-msa", "target_cluster": "" },
+                { "app_group": "service-mesh", "path": "k8ssandra-operator", "namespace": "tks-msa", "target_cluster": "" }
+              ]
+        dependencies:
+        - cert-manager
+
+      - name: servicemesh-k8ssandra-resource
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+          - name: list
+            value: |
+              [
+                { "app_group": "service-mesh", "path": "servicemesh-k8ssandra-resource", "namespace": "tks-msa", "target_cluster": "" }
+              ]
+        dependencies:
+        - k8ssandra-operator
+
+      - name: istio-base
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+          - name: list
+            value: |
+              [
+                { "app_group": "service-mesh", "path": "istio-base-crds", "namespace": "tks-msa", "target_cluster": "" },
+                { "app_group": "service-mesh", "path": "istio-base", "namespace": "tks-msa", "target_cluster": "" }
+                
+              ]
+        dependencies:
+        - servicemesh-k8ssandra-resource
+
+      - name: istiod
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+          - name: list
+            value: |
+              [
+                { "app_group": "service-mesh", "path": "istiod", "namespace": "tks-msa", "target_cluster": "" }
+              ]
+        dependencies:
+        - istio-base
+
+      - name: istio-gateway
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+          - name: list
+            value: |
+              [
+                { "app_group": "service-mesh", "path": "istio-ingressgateway", "namespace": "tks-gateway", "target_cluster": "" },
+                { "app_group": "service-mesh", "path": "istio-egressgateway", "namespace": "tks-gateway", "target_cluster": "" }
+              ]
+        dependencies:
+        - istiod
+
+      - name: jaeger-kiali-operator
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+          - name: list
+            value: |
+              [
+                { "app_group": "service-mesh", "path": "jaeger-operator-crds", "namespace": "tks-msa", "target_cluster": "" },
+                { "app_group": "service-mesh", "path": "kiali-operator-crds", "namespace": "tks-msa", "target_cluster": "" },
+                { "app_group": "service-mesh", "path": "jaeger-operator", "namespace": "tks-msa", "target_cluster": "" },
+                { "app_group": "service-mesh", "path": "kiali-operator", "namespace": "tks-msa", "target_cluster": "" }
+              ]
+        dependencies:
+        - istiod
+
+      - name: servicemesh-jaeger-kiali-resource
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+            - name: list
+              value: |
+                [
+                  { "app_group": "service-mesh", "path": "servicemesh-jaeger-resource", "namespace": "tks-msa", "target_cluster": "" },
+                  { "app_group": "service-mesh", "path": "servicemesh-kiali-resource", "namespace": "tks-msa", "target_cluster": "" }
+                ]
+        dependencies:
+        - jaeger-kiali-operator
+
+      - name: grafana-prometheus-resource
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+          - name: list
+            value: |
+              [
+                { "app_group": "service-mesh", "path": "servicemesh-grafana-dashboard", "namespace": "tks-msa", "target_cluster": "" },
+                { "app_group": "service-mesh", "path": "servicemesh-prometheusmonitor", "namespace": "tks-msa", "target_cluster": "" },
+                { "app_group": "service-mesh", "path": "servicemesh-prometheusrule", "namespace": "tks-msa", "target_cluster": "" }
+              ]
+        dependencies:
+        - servicemesh-jaeger-kiali-resource
+
+      - name: gatekeeper
+        templateRef:
+          name: create-application
+          template: installApps
+        arguments:
+          parameters:
+            - name: list
+              value: |
+                [
+                  { "app_group": "service-mesh", "path": "gatekeeper", "namespace": "tks-msa", "target_cluster": "" }
+                ]
+        dependencies:
+          - grafana-prometheus-resource
+
+  - name: create-namespace
+    inputs:
+      parameters:
+      - name: namespace
+        value: ""
+      - name: label
+        value: ""
+    container:
+      name: create-namespace
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          function log() {
+            level=$1
+            msg=$2
+            date=$(date '+%F %H:%M:%S')
+            echo "[$date] $level     $msg"
+          }
+
+          CLUSTER_ID={{workflow.parameters.cluster_id}}
+          kube_params=""
+          if [[ -n "${CLUSTER_ID}" ]]; then
+            kube_secret=$(kubectl get secret -n {{workflow.parameters.cluster_id}} {{workflow.parameters.cluster_id}}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+            echo -e "kube_secret:\n$kube_secret" | head -n 5
+            cat <<< "$kube_secret" > /etc/kubeconfig
+            kube_params+="--kubeconfig=/etc/kubeconfig"
+          fi
+
+          kubectl $kube_params get ns ${NAMESPACE}
+          if [[ $? =~ 1 ]]; then
+            kubectl $kube_params create ns ${NAMESPACE}
+            IFS=','; for l in ${LABEL}; do kubectl $kube_params label ns ${NAMESPACE} ${l}; done
+            log "INFO" "${NAMESPACE} successfully created."
+          fi
+      env:
+      - name: NAMESPACE
+        value: '{{inputs.parameters.namespace}}'
+      - name: LABEL
+        value: '{{inputs.parameters.label}}'
+    activeDeadlineSeconds: 900
+    retryStrategy:
+      limit: 2
+
+  - name: create-namespace-list
+    inputs:
+      parameters:
+      - name: list
+    steps:
+    - - name: create-namespace
+        template: create-namespace
+        arguments:
+          parameters:
+          - {name: namespace, value: "{{item.namespace}}"}
+          - {name: label, value: "{{item.label}}"}
+        withParam: "{{inputs.parameters.list}}"
+
+  - name: sync-app
+    container:
+      name: sync-app
+      image: harbor.taco-cat.xyz/tks/argocd:latest
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          ./argocd login $ARGO_SERVER --plaintext --insecure --username $ARGO_USERNAME \
+          --password $ARGO_PASSWORD
+
+          app_label=""
+          if [[ -n "{{ workflow.parameters.app_prefix }}" ]]; then
+            app_label+="-l app={{ workflow.parameters.app_prefix }}-service-mesh"
+          else
+            app_label+="-l app=service-mesh"
+          fi
+
+          ./argocd app sync $app_label
+      envFrom:
+        - secretRef:
+            name: decapod-argocd-config
+    activeDeadlineSeconds: 900
+    retryStrategy:
+      limit: 2

@@ -1,0 +1,100 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: prepare-argocd
+  namespace: argo
+spec:
+  entrypoint: preparation
+  arguments:
+    parameters:
+    - name: argo_server
+      value: "decapod-argocd-server.argo.svc:80"
+    - name: argo_username
+      value: "admin"
+    - name: argo_password
+      value: "password"
+  templates:
+  - name: configuration
+    activeDeadlineSeconds: 120
+    container:
+      name: 'config'
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.8
+      imagePullPolicy: IfNotPresent
+      command:
+      - /bin/bash
+      - -c
+      - |
+        kubectl get secret decapod-argocd-config -nargo
+
+        if [[ $? =~ 0 ]]; then 
+          kubectl delete secret decapod-argocd-config -nargo
+        fi
+
+        kubectl create secret generic decapod-argocd-config -nargo \
+        --from-literal=ARGO_SERVER=$ARGO_SERVER \
+        --from-literal=ARGO_USERNAME=$ARGO_USERNAME \
+        --from-literal=ARGO_PASSWORD=$ARGO_PASSWORD
+
+        kubectl annotate secret decapod-argocd-config -nargo kubed.appscode.com/sync="decapod-argocd-config=enabled"
+
+      env:
+      - name: ARGO_SERVER
+        value: "{{workflow.parameters.argo_server}}"
+      - name: ARGO_USERNAME
+        value: "{{workflow.parameters.argo_username}}"
+      - name: ARGO_PASSWORD
+        value: "{{workflow.parameters.argo_password}}"
+
+  - name: createProject
+    container:
+      name: create
+      image: harbor.taco-cat.xyz/tks/argocd-cli:v2.2.5
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          ./argocd login $ARGO_SERVER --plaintext --insecure --username $ARGO_USERNAME \
+          --password $ARGO_PASSWORD
+
+          ./argocd proj get lma
+          if [[ $? != 0 ]]; then
+            ./argocd proj create lma --dest "*,*" --src "*" --allow-cluster-resource "*/*"
+          fi
+
+          ./argocd proj get service-mesh
+          if [[ $? != 0 ]]; then
+            ./argocd proj create service-mesh --dest "*,*" --src "*" --allow-cluster-resource "*/*"
+          fi
+
+          ./argocd proj get sealed-secrets
+          if [[ $? != 0 ]]; then
+            ./argocd proj create sealed-secrets --dest "*,*" --src "*" --allow-cluster-resource "*/*"
+          fi
+
+          ./argocd proj get tks-cluster
+          if [[ $? != 0 ]]; then
+            ./argocd proj create tks-cluster --dest "*,*" --src "*" --allow-cluster-resource "*/*"
+          fi
+
+          ./argocd proj get tks-admin-tools
+          if [[ $? != 0 ]]; then
+            ./argocd proj create tks-admin-tools --dest "*,*" --src "*" --allow-cluster-resource "*/*"
+          fi
+      env:
+        - name: ARGO_SERVER
+          value: '{{workflow.parameters.argo_server}}'
+        - name: ARGO_USERNAME
+          value: '{{workflow.parameters.argo_username}}'
+        - name: ARGO_PASSWORD
+          value: '{{workflow.parameters.argo_password}}'
+    activeDeadlineSeconds: 120
+
+  - name: preparation
+    steps:
+      - - name: configuration
+          template: configuration
+          arguments: {}
+      - - name: createProject
+          template: createProject
+          arguments: {}

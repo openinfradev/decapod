@@ -1,0 +1,112 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: render-manifests
+  namespace: argo
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: cluster_id
+        value: "c011b88fa"
+      - name: decapod_repo_url
+        value: "gitea-http.gitea.svc:3000/decapod10/decapod"
+      - name: decapod_repo_branch
+        value: main
+      - name: manifest_repo_url
+        value: "gitea-http.gitea.svc:3000/decapod10/decapod-manifests"
+      - name: manifest_repo_branch
+        value: main
+      - name: git_repo_type
+        value: gitea
+      - name: https_enabled
+        value: "false"
+
+  templates:
+    #=========================================================
+    # Template Pipeline
+    #=========================================================
+    - name: main
+      steps:
+        - - name: render-manifests
+            template: render-manifests-template
+            arguments:
+              parameters:
+                - name: cluster_id
+                  value: "{{workflow.parameters.cluster_id}}"
+                - name: decapod_repo_url
+                  value: "{{workflow.parameters.decapod_repo_url}}"
+                - name: decapod_repo_branch
+                  value: "{{workflow.parameters.decapod_repo_branch}}"
+                - name: manifest_repo_url
+                  value: "{{workflow.parameters.manifest_repo_url}}"
+                - name: manifest_repo_branch
+                  value: "{{workflow.parameters.manifest_repo_branch}}"
+                - name: git_repo_type
+                  value: "{{workflow.parameters.git_repo_type}}"
+                - name: https_enabled
+                  value: "{{workflow.parameters.https_enabled}}"
+
+    #=========================================================
+    # Template Definition
+    #=========================================================
+    - name: render-manifests-template
+      inputs:
+        parameters:
+          - name: cluster_id
+          - name: decapod_repo_url
+          - name: decapod_repo_branch
+          - name: manifest_repo_url
+          - name: manifest_repo_branch
+          - name: git_repo_type
+          - name: https_enabled
+      container:
+        name: render-manifests-template
+        image: harbor.taco-cat.xyz/tks/decapod-render:v3.3.4
+        command:
+          - /bin/bash
+          - "-exc"
+          - |
+            #!/bin/bash
+
+            function log() {
+              level=$2
+              msg=$3
+              date=$(date '+%F %H:%M:%S')
+              if [ $1 -eq 0 ];then
+                echo "[$date] $level     $msg"
+              else
+                level="ERROR"
+                echo "[$date] $level     $msg failed"
+                exit $1
+              fi
+            }
+
+            GIT_TOKEN=${TOKEN//[$'\t\r\n ']}
+
+            CLUSTER_ID={{inputs.parameters.cluster_id}}
+            DECAPOD_REPO_URL={{inputs.parameters.decapod_repo_url}}
+            DECAPOD_REPO_BRANCH={{inputs.parameters.decapod_repo_branch}}
+            MANIFEST_REPO_URL={{inputs.parameters.manifest_repo_url}}
+            MANIFEST_REPO_BRANCH={{inputs.parameters.manifest_repo_branch}}
+            GIT_REPO_TYPE={{inputs.parameters.git_repo_type}}
+            if [ "{{inputs.parameters.https_enabled}}" = "true" ]; then
+              HTTP_STRING="https"
+            else
+              HTTP_STRING="http"
+            fi
+
+            git clone -b ${DECAPOD_REPO_BRANCH} ${HTTP_STRING}://$(echo -n ${GIT_TOKEN})@${DECAPOD_REPO_URL} ${CLUSTER_ID}
+
+            cd $CLUSTER_ID
+
+            ./render.sh --cluster-id $CLUSTER_ID \
+              --git-token $GIT_TOKEN \
+              --manifests-git $HTTP_STRING://$MANIFEST_REPO_URL --git-rev $MANIFEST_REPO_BRANCH
+
+        envFrom:
+          - secretRef:
+              name: "git-svc-token"
+      activeDeadlineSeconds: 900
+      retryStrategy:
+        limit: 2

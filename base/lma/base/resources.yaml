@@ -1,0 +1,1252 @@
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: prometheus-operator-crds
+  name: prometheus-operator-crds
+spec:
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: kube-prometheus-stack
+    version: 48.3.1
+    origin: https://prometheus-community.github.io/helm-charts
+  helmVersion: v3
+  releaseName: prometheus-operator-crds
+  targetNamespace: lma
+  values: {}
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: prometheus-operator
+  name: prometheus-operator
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: kube-prometheus-stack
+    version: 48.3.1
+    origin: https://prometheus-community.github.io/helm-charts
+  releaseName: prometheus-operator
+  targetNamespace: lma
+  values:
+    fullnameOverride: prometheus-operator
+    defaultRules:
+      create: false
+    global:
+      rbac:
+        create: true
+      imageRegistry: harbor.taco-cat.xyz
+    alertmanager:
+      enabled: false
+    grafana:
+      enabled: false
+    kubeApiServer:
+      enabled: false
+    kubelet:
+      enabled: false
+    kubeControllerManager:
+      enabled: false
+    coreDns:
+      enabled: false
+    kubeDns:
+      enabled: false
+    kubeEtcd:
+      enabled: false
+    kubeScheduler:
+      enabled: false
+    kubeProxy:
+      enabled: false
+    kubeStateMetrics:
+      enabled: false
+#   kube-state-metrics: # subchart configuration
+    nodeExporter:
+      enabled: false
+#   prometheus-node-exporter: # subchart configuration
+    prometheusOperator:
+      enabled: true
+      image:
+        repository: tks/prometheus-operator
+        tag: v0.66.0
+      admissionWebhooks:
+        patch:
+          image:
+            repository: tks/kube-webhook-certgen
+            tag: v20221220-controller-v1.5.1-58-g787ea74b6
+      prometheusConfigReloader:
+        image:
+          repository: tks/prometheus-config-reloader
+          tag: v0.66.0
+      thanosImage:
+        repository: tks/thanos
+        tag: v0.31.0
+      nodeSelector: {}  # TO_BE_FIXED
+      createCustomResource: true
+      cleanupCustomResource: true
+      cleanupCustomResourceBeforeInstall: true
+    prometheus:
+      enabled: false
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: prometheus
+  name: prometheus
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: kube-prometheus-stack
+    version: 48.3.1
+    origin: https://prometheus-community.github.io/helm-charts
+  releaseName: prometheus
+  targetNamespace: lma
+  values:
+    defaultRules:
+      create: false
+    global:
+      rbac:
+        create: true
+      imageRegistry: harbor.taco-cat.xyz
+    alertmanager:
+      alertmanagerSpec:
+        image:
+          repository: tks/alertmanager
+          tag: v0.25.0
+        nodeSelector: {} # TO_BE_FIXED
+        retention: TO_BE_FIXED
+
+      config:
+        global:
+          slack_api_url: TO_BE_FIXED
+          smtp_auth_password: null
+          smtp_auth_username: null
+          smtp_from: null
+          smtp_smarthost: null
+        receivers:
+        - name: default-alert
+          slack_configs:
+          - channel: '#default-alerts-ep'
+            send_resolved: true
+            text: |-
+              {{ if or (and (eq (len .Alerts.Firing) 1) (eq (len .Alerts.Resolved) 0)) (and (eq (len .Alerts.Firing) 0) (eq (len .Alerts.Resolved) 1)) }}
+                {{ range .Alerts.Firing }}{{ .Annotations.message }}{{ end }}{{ range .Alerts.Resolved }}{{ .Annotations.message }}{{ end }}
+              {{ else }}
+              {{ if gt (len .Alerts.Firing) 0 }}
+              *Alerts Firing:*
+                {{ range .Alerts.Firing }}- {{ .Labels.alertname  }}: {{ .Annotations.message }}
+              {{ end }}{{ end }}
+              {{ if gt (len .Alerts.Resolved) 0 }}
+              *Alerts Resolved:*
+                {{ range .Alerts.Resolved }}- {{ .Labels.alertname }}: {{ .Annotations.message }}
+              {{ end }}{{ end }}
+              {{ end }}
+            title: '[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ if or (and (eq (len .Alerts.Firing) 1) (eq (len .Alerts.Resolved) 0)) (and (eq (len .Alerts.Firing) 0) (eq (len .Alerts.Resolved) 1)) }} {{ range .Alerts.Firing }}{{ .Labels.alertname }}{{ end }}{{ range .Alerts.Resolved }}{{ .Labels.alertname }}{{ end }}{{ end }}'
+            username: Prometheus
+        - name: slack-alert
+          slack_configs:
+          - channel: '#default-alerts-ep' #FIXME
+            send_resolved: true
+            text: |-
+              {{ if or (and (eq (len .Alerts.Firing) 1) (eq (len .Alerts.Resolved) 0)) (and (eq (len .Alerts.Firing) 0) (eq (len .Alerts.Resolved) 1)) }}
+                {{ range .Alerts.Firing }}{{ .Annotations.message }}{{ end }}{{ range .Alerts.Resolved }}{{ .Annotations.message }}{{ end }}
+              {{ else }}
+              {{ if gt (len .Alerts.Firing) 0 }}
+              *Alerts Firing:*
+                {{ range .Alerts.Firing }}- {{ .Labels.alertname }}: {{ .Annotations.message }}
+              {{ end }}{{ end }}
+              {{ if gt (len .Alerts.Resolved) 0 }}
+              *Alerts Resolved:*
+                {{ range .Alerts.Resolved }}- {{ .Labels.alertname }}: {{ .Annotations.message }}
+              {{ end }}{{ end }}
+              {{ end }}
+            title: '[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ if or (and (eq (len .Alerts.Firing) 1) (eq (len .Alerts.Resolved) 0)) (and (eq (len .Alerts.Firing) 0) (eq (len .Alerts.Resolved) 1)) }} {{ range .Alerts.Firing }}{{ .Labels.alertname }}{{ end }}{{ range .Alerts.Resolved }}{{ .Labels.alertname }}{{ end }}{{ end }}'
+            username: Prometheus
+        - name: telegram-alert
+          webhook_configs:
+          - send_resolved: true
+            url: http://prometheus-bot:9087/alert/-GROUP_ID
+        route:
+          group_by:
+          - alertname
+          group_wait: 10s
+          receiver: default-alert
+          repeat_interval: 1h
+          # routes:
+          # - group_by:
+          #   - alertname
+          #   match:
+          #     severity: page
+          #   receiver: slack-alert
+      enabled: true
+    grafana:
+      enabled: false
+    kubeApiServer:
+      enabled: true
+      serviceMonitor:
+        interval: TO_BE_FIXED
+    kubelet:
+      enabled: false
+    kubeControllerManager:
+      enabled: true
+    coreDns:
+      enabled: true
+      serviceMonitor:
+        interval: TO_BE_FIXED
+    kubeDns:
+      enabled: true
+      serviceMonitor:
+        interval: TO_BE_FIXED
+    kubeEtcd:
+      enabled: true
+      endpoints: []
+      serviceMonitor:
+        interval: TO_BE_FIXED
+        scheme: http
+    kubeScheduler:
+      enabled: true
+    kubeProxy:
+      enabled: true
+      serviceMonitor:
+        interval: TO_BE_FIXED
+    kubeStateMetrics:
+      enabled: false
+#   kube-state-metrics: # subchart configuration
+    nodeExporter:
+      enabled: false
+#   prometheus-node-exporter: # subchart configuration
+    fullnameOverride: lma
+    prometheusOperator:
+      enabled: false
+    prometheus:
+      prometheusSpec:
+        image:
+          repository: tks/prometheus
+          tag: v2.45.0
+        retention: TO_BE_FIXED
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              storageClassName: TO_BE_FIXED
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: TO_BE_FIXED
+        externalLabels:
+          taco_cluster: TO_BE_FIXED
+        nodeSelector:
+          taco-lma: TO_BE_FIXED
+        replicas: 1
+        ruleNamespaceSelector:
+          matchLabels:
+            name: lma
+        ruleSelectorNilUsesHelmValues: false
+        secrets:
+        - etcd-client-cert
+        serviceMonitorNamespaceSelector:
+          matchLabels:
+            name: lma
+        serviceMonitorSelectorNilUsesHelmValues: false
+        podMonitorNamespaceSelector:
+          matchLabels:
+            name: lma
+        podMonitorSelectorNilUsesHelmValues: false
+        thanos:
+          version: v0.18.0
+          objectStorageConfig:
+            key: objstore.yml
+            name: TO_BE_FIXED # secret name
+          minTime: -3h
+        evaluationInterval: 60s
+        scrapeInterval: 30s
+        scrapeTimeout: 10s
+      thanosServiceExternal:
+        enabled: true
+        annotations: {}
+        labels: {}
+        portName: grpc
+        port: 10901
+        targetPort: "grpc"
+        type: LoadBalancer
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: eck-operator
+  name: eck-operator
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: eck-operator
+    version: 1.8.0
+    origin: https://helm.elastic.co
+  releaseName: eck-operator
+  targetNamespace: elastic-system
+  values:
+    image:
+      repository: harbor.taco-cat.xyz/tks/eck-operator
+      tag: 1.8.0
+    installCRDs: true
+    replicaCount: 1
+    config:
+      containerRegistry: docker.elastic.co
+    global:
+      manifestGen: true
+      kubeVersion: 1.22.2
+      createOperatorNamespace: false
+    softMultiTenancy:
+      enabled: false
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: kube-state-metrics
+  name: kube-state-metrics
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    # repository: https://kubernetes.github.io/kube-state-metrics
+    # --------------------------------------------------------------------
+    # this repo is not working on 2021.1.6
+    # several issues are opend for this
+    #    - https://github.com/kubernetes/kube-state-metrics/issues/1331
+    #    - https://github.com/kubernetes/kube-state-metrics/issues/1337
+    #    - https://github.com/kubernetes/kube-state-metrics/issues/1342
+    # so, i'll use bitnami before the issues are closed
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: kube-state-metrics
+    # version: 2.9.4
+    version: 3.3.4
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: kube-state-metrics
+  targetNamespace: lma
+  values:
+    image:
+      registry: harbor.taco-cat.xyz
+      repository: tks/kube-state-metrics
+    nodeSelector: {} # TO_BE_FIXED
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: prometheus-node-exporter
+  name: prometheus-node-exporter
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: prometheus-node-exporter
+    version: 4.13.0
+    origin: https://prometheus-community.github.io/helm-charts
+  releaseName: prometheus-node-exporter
+  targetNamespace: lma
+  values:
+    image:
+      repository: harbor.taco-cat.xyz/tks/node-exporter
+      tag: v1.0.1
+    # Expose the service to the host network
+    hostNetwork: true
+    prometheus:
+      monitor:
+        enabled: true
+        relabelings:
+        - action: replace
+          sourceLabels:
+          - __meta_kubernetes_endpoint_node_name
+          targetLabel: hostname
+    extraArgs:
+    - --no-collector.hwmon
+    tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: prometheus-pushgateway
+  name: prometheus-pushgateway
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: prometheus-pushgateway
+    version: 2.1.1
+    origin: https://prometheus-community.github.io/helm-charts
+  releaseName: prometheus-pushgateway
+  targetNamespace: lma
+  values:
+    image:
+      repository: harbor.taco-cat.xyz/tks/pushgateway
+      tag: v1.3.0
+    service:
+      type: ClusterIP
+    nodeSelector: {} # TO_BE_FIXED
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: prometheus-process-exporter
+  name: prometheus-process-exporter
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: prometheus-process-exporter
+    version: 0.1.4-skt
+    skipDepUpdate: true
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: prometheus-process-exporter
+  targetNamespace: lma
+  values:
+    images:
+      tags:
+        dep_check: harbor.taco-cat.xyz/tks/kubernetes-entrypoint:v1.0.0
+        image_repo_sync: harbor.taco-cat.xyz/tks/docker:19.03
+        process_exporter: harbor.taco-cat.xyz/tks/process-exporter:0.2.11
+    labels:
+      process_exporter:
+        process_selector_key: process-exporter
+        process_selector_value: enabled
+    pod:
+      lifecycle:
+        upgrades:
+          daemonsets:
+            process_exporter:
+              max_unavailable: 30%
+      mandatory_access_control:
+        type: null
+      tolerations:
+        process_exporter:
+          enabled: true
+          tolerations:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+          - key: node-role.kubernetes.io/master
+            operator: Exists
+          - key: node-role.kubernetes.io/node
+            operator: Exists
+      # Expose the service to the host network
+      hostNetwork: true
+    conf:
+      processes: dockerd,kubelet,kube-proxy,ntpd
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: eck-resource
+  name: eck-resource
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: eck-resource
+    version: 1.1.1
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: eck-resource
+  targetNamespace: lma
+  values:
+    elasticsearch:
+      image:
+        repository: harbor.taco-cat.xyz/tks/elasticsearch
+        tag: 7.5.1
+      adminPassword: TO_BE_FIXED
+      enabled: true
+      count: 3        # FIXME
+      http:
+        service:
+          spec:
+            type: NodePort
+            ports:
+            - name: https
+              nodePort: 30011
+              targetPort: 9200
+              port: 9200
+      nodeSets:
+        master:
+          enabled: true
+          nodeSelector: {} # TO_BE_FIXED
+          count: 3
+          javaOpts: TO_BE_FIXED
+          limitCpu: TO_BE_FIXED
+          limitMem: TO_BE_FIXED
+          pvc:
+            storageClassName: TO_BE_FIXED
+            size: TO_BE_FIXED
+        hotdata:
+          enabled: true
+          nodeSelector: {} # TO_BE_FIXED
+          count: 3
+          javaOpts: TO_BE_FIXED
+          limitCpu: TO_BE_FIXED
+          limitMem: TO_BE_FIXED
+          pvc:
+            storageClassName: TO_BE_FIXED
+            size: TO_BE_FIXED
+        warmdata:
+          enabled: false # TO_BE_FIXED
+          nodeSelector: {} # TO_BE_FIXED
+          count: 2
+          javaOpts: TO_BE_FIXED
+          limitCpu: TO_BE_FIXED
+          limitMem: TO_BE_FIXED
+          pvc:
+            storageClassName: TO_BE_FIXED
+            size: TO_BE_FIXED
+        client:
+          enabled: true # TO_BE_FIXED
+          nodeSelector: {} # TO_BE_FIXED
+          count: TO_BE_FIXED
+          javaOpts: TO_BE_FIXED
+          limitCpu: TO_BE_FIXED
+          limitMem: TO_BE_FIXED
+          pvc:
+            storageClassName: TO_BE_FIXED
+            size: 0.5Gi
+    kibana:
+      image:
+        repository: harbor.taco-cat.xyz/tks/kibana
+        tag: 7.5.1
+      enabled: true
+      http:
+        tls:
+          selfSignedCertificate:
+            disabled: true
+        service:
+          spec:
+            type: NodePort
+            ports:
+            - name: http
+              nodePort: 30001
+              targetPort: 5601
+              port: 5601
+      limitCpu: TO_BE_FIXED
+      limitMem: TO_BE_FIXED
+      nodeSelector: {} # TO_BE_FIXED
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: grafana
+  name: grafana
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: grafana
+    version: 6.50.7
+    origin: https://grafana.github.io/helm-charts
+  releaseName: grafana
+  targetNamespace: lma
+  values:
+    downloadDashboardsImage:
+      repository: harbor.taco-cat.xyz/tks/curl
+      tag: latest
+    image:
+      repository: harbor.taco-cat.xyz/tks/grafana
+      tag: 8.3.3
+    initChownData:
+      image:
+        repository: harbor.taco-cat.xyz/tks/busybox
+        tag: latest
+    adminPassword: password
+    sidecar:
+      image:
+        repository: harbor.taco-cat.xyz/tks/k8s-sidecar
+        tag: 1.14.2
+      dashboards:
+        enabled: true
+        label: grafana_dashboard
+      datasources:
+        enabled: true
+        label: grafana_datasource
+    testFramework:
+      image: harbor.taco-cat.xyz/tks/bats
+      tag: v1.4.1
+    service:
+      type: NodePort
+      nodePort: 30009
+    persistence:
+      enabled: true
+      size: 10G #FIXME
+      storageClassName: TO_BE_FIXED
+    grafana.ini:
+      plugins:
+        vonage-status-panel: true
+        grafana-piechart-panel: true
+    plugins:
+    - vonage-status-panel
+    - grafana-piechart-panel
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: fluent-operator-crds
+  name: fluent-operator-crds
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: fluent-operator
+    version: 1.7.0
+    skipDepUpdate: true
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: fluent-operator-crds
+  targetNamespace: lma
+  values: {}
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: fluent-operator
+  name: fluent-operator
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    origin: https://openinfradev.github.io/helm-repo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: fluent-operator
+    version: 1.7.0
+    skipDepUpdate: true
+  releaseName: fluent-operator
+  targetNamespace: lma
+  values:
+    operator:
+      initcontainer:
+        repository: harbor.taco-cat.xyz/tks/docker
+        tag: 19.03
+      container:
+        repository: harbor.taco-cat.xyz/tks/fluent-operator
+        tag: v1.5.0
+      # FluentBit operator resources. Usually user needn't to adjust these.
+      resources:
+        limits:
+          cpu: 1000m
+          memory: 200Mi
+        requests:
+          cpu: 100m
+          memory: 20Mi
+    fluentbit:
+      image:
+        repository: harbor.taco-cat.xyz/tks/fluent-bit
+        tag: v1.9.7-debug
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: fluentbit
+  name: fluentbit
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: fluentbit-resource
+    version: 1.3.0
+    skipDepUpdate: true
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: fluentbit
+  targetNamespace: lma
+  values:
+    fullnameOverride: fbcr-taco
+    image:
+      exporter:
+        repository: harbor.taco-cat.xyz/tks/logalert-exporter
+        tag: v0.1.1
+      fluentbit:
+        repository: harbor.taco-cat.xyz/tks/fluent-bit
+        tag: v2.1.4
+      elasticsearchTemplates:
+        repository: harbor.taco-cat.xyz/tks/curl
+        tag: latest
+    fluentbit:
+      enabled: true
+      daemonset:
+        spec:
+          tolerations:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+          - key: node-role.kubernetes.io/master
+            operator: Exists
+          - key: node-role.kubernetes.io/node
+            operator: Exists
+      job:
+        spec:
+          nodeSelector:
+            taco-lma: enabled
+      parsers:
+      - name: taco-syslog-parser-for-ubuntu # modified from syslog-rfc3164
+        regex:
+          regex: '^(?<time>[^ ]* {1,2}[^ ]* [^ ]*) (?<host>[^ ]*) (?<ident>[a-zA-Z0-9_\/\.\-]*)(?:\[(?<pid>[0-9]+)\])?(?:[^\:]*\:)? *(?<message>.*)$'
+          timeFormat: '%b %d %H:%M:%S'
+          timeKeep: false
+          timeKey: 'time'
+      outputs: { }
+      targetLogs: [ ]
+      alerts:
+        enabled: true
+        namespace: taco-system
+        message: |-
+          {{ $labels.container }} in {{ $labels.pod }} ({{ $labels.taco_cluster }}/{{ $labels.namespace }} ) generate a error due to log = {{ $labels.log }}
+        summary: |-
+          {{ $labels.container }} in {{ $labels.pod }} ({{ $labels.taco_cluster }}/{{ $labels.namespace }} ) generate a error
+        rules: [ ]
+      clusterName: TO_BE_FIXED
+      exclude:
+      - key: $kubernetes['container_name']
+        value: kibana|elasticsearch|fluent-bit
+    logExporter:
+      enabled: false
+      serviceMonitor:
+        enabled: false
+      spec:
+        nodeSelector:
+          taco-lma: enabled
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: addons
+  name: addons
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: lma-addons
+    version: 1.8.7
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: addons
+  targetNamespace: lma
+  values:
+    grafanaDatasource:
+      enabled: true
+      namespace: lma
+      prometheus:
+        enabled: true
+        url: "lma-prometheus.lma:9090"
+      loki:
+        enabled: true
+        url: "loki-loki-distributed-gateway.lma"
+    grafanaDashboard:
+      include:
+      - kubernetes
+      - node
+      - loki
+      - calico
+      - etcd
+      namespace: lma
+    serviceMonitor:
+      calico:
+        enabled: true
+        interval: TO_BE_FIXED
+      processExporter:
+        enabled: true
+        interval: TO_BE_FIXED
+        selector:
+          matchLabels:
+            application: process_exporter
+            component: metrics
+            release_group: prometheus-process-exporter
+      istio:
+        enabled: true
+        interval: TO_BE_FIXED
+      jaeger:
+        enabled: true
+        interval: TO_BE_FIXED
+      grafana:
+        enabled: true
+        interval: TO_BE_FIXED
+      argocd:
+        enabled: true
+        interval: TO_BE_FIXED
+      argoRollout:
+        enabled: true
+        interval: TO_BE_FIXED
+      argowf:
+        enabled: true
+        interval: TO_BE_FIXED
+      ceph:
+        enabled: false  #FIXME
+        interval: TO_BE_FIXED
+        mon_hosts: []
+      kubeStateMetrics:
+        enabled: true
+      nodeExporter:
+        enabled: false
+      pushgateway:
+        enabled: true
+      kubelet:
+        enabled: true
+        interval: TO_BE_FIXED
+      federations: [] # TO_BE_FIXED
+    kibanaInit:
+      enabled: false
+    prometheusRules:
+      aggregation:
+        enabled: true
+      alert:
+        enabled: true
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: prometheus-adapter
+  name: prometheus-adapter
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: prometheus-adapter
+    version: 2.5.1
+    origin: https://prometheus-community.github.io/helm-charts
+  releaseName: prometheus-adapter
+  targetNamespace: lma
+  values:
+    image:
+      repository: harbor.taco-cat.xyz/tks/k8s-prometheus-adapter-amd64
+      image.tag: v0.7.0
+    prometheus:
+      url: http://lma-prometheus
+      port: 9090
+    rules:
+      default: false
+    nodeSelector: {} # TO_BE_FIXED
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: kubernetes-event-exporter
+  name: kubernetes-event-exporter
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: kubernetes-event-exporter
+    version: 2.0.1
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: kubernetes-event-exporter
+  targetNamespace: lma
+  values:
+    image:
+      exporter:
+        repository: harbor.taco-cat.xyz/tks/kubernetes-event-exporter
+        tag: v1.0
+      sidecar:
+        repository: harbor.taco-cat.xyz/tks/fluent-bit
+        tag: 1.9.7-debug
+
+    clustername: TO_BE_FIXED
+    conf:
+      logLevel: error     # possible level: error, debug,
+      logFormat: json
+      recievers: [ ]
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: minio
+  name: minio
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: minio
+    version: 5.0.4
+    origin: https://charts.min.io
+  releaseName: minio
+  targetNamespace: lma
+  values:
+    image:
+      repository: harbor.taco-cat.xyz/tks/minio
+      tag: RELEASE.2023-01-20T02-05-44Z
+    mcImage:
+      repository: harbor.taco-cat.xyz/tks/mc
+      tag: RELEASE.2023-01-11T03-14-16Z
+    users: [] # MUST_BE_DEFINED
+    buckets: [] # MUST_BE_DEFINED
+    persistence:
+      storageClass: MUST_BE_DEFINED
+      accessMode: ReadWriteOnce # tunable
+      size: 20Gi # tunable
+    resources:
+      requests:
+        memory: 1Gi # tunable
+      limits:
+        memory: 2Gi # tunable
+    mode: standalone
+    DeploymentUpdate:
+      type: Recreate
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: thanos
+  name: thanos
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: thanos
+    version: 12.3.2-skt
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: thanos
+  targetNamespace: lma
+  values:
+    global:
+      storageClass: local-path
+    image:
+      registry: harbor.taco-cat.xyz
+      repository: tks/thanos
+      tag: v0.30.2
+    clusterDomain: TO_BE_FIXED
+    existingObjstoreSecret: TO_BE_FIXED
+    query:
+      nodeSelector: {}
+      dnsDiscovery:
+        enabled: false
+        sidecarsService: TO_BE_FIXED
+        sidecarsNamespace: lma
+    queryFrontend:
+      enabled: false
+      nodeSelector: {}
+      service:
+        type: TO_BE_FIXED
+        nodePorts:
+          http: TO_BE_FIXED
+      config: |-
+        type: IN-MEMORY
+        config:
+          max_size: TO_BE_FIXED
+          max_size_items: TO_BE_FIXED
+          validity: TO_BE_FIXED
+      extraFlags: []
+        # query-range.split-interval: TO_BE_FIXED
+        # query-range.max-retries-per-request: TO_BE_FIXED
+        # query-frontend.log-queries-longer-than: TO_BE_FIXED
+    bucketweb:
+      enabled: true
+      logLevel: info
+      refresh: 30m
+      timeout: 5m
+      nodeSelector: {}
+      service:
+        type: ClusterIP
+        http:
+          port: 8080
+    compactor:
+      enabled: true
+      logLevel: info
+      retentionResolutionRaw: TO_BE_FIXED
+      retentionResolution5m: TO_BE_FIXED
+      retentionResolution1h: TO_BE_FIXED
+      consistencyDelay: TO_BE_FIXED
+      resources:
+        limits:
+          memory: TO_BE_FIXED
+          cpu: TO_BE_FIXED
+      nodeSelector: {}
+      service:
+        type: ClusterIP
+        http:
+          port: 9090
+      persistence:
+        enabled: true
+        accessModes:
+          - ReadWriteOnce
+        size: TO_BE_FIXED
+      extraFlags: []
+        # Compaction 수행 관련 커맨트
+        # 아래와 같은 block stream들이 있을때
+        # external_labels: {cluster="eu1", replica="1", receive="true", environment="production"}
+        # external_labels: {cluster="eu1", replica="2", receive="true", environment="production"}
+        # external_labels: {cluster="us1", replica="1", receive="true", environment="production"}
+        # external_labels: {cluster="us1", replica="1", receive="true", environment="staging"}
+        # --compact.enable-vertical-compaction 와 함께 --deduplication.replica-label="replica" 라고 설정하면 아래와 같이 compcation됨
+        # external_labels: {cluster="eu1", receive="true", environment="production"} (2 streams, resulted in one)
+        # external_labels: {cluster="us1", receive="true", environment="production"}
+        # external_labels: {cluster="us1", receive="true", environment="staging"}
+    storegateway:
+      enabled: true
+      logLevel: info
+      nodeSelector: {}
+      service:
+        type: ClusterIP
+        http:
+          port: 9090
+        grpc:
+          port: 10901
+      config: |-
+        type: IN-MEMORY
+        config:
+          max_size: TO_BE_FIXED
+          max_item_size: TO_BE_FIXED
+      persistence:
+        enabled: true
+        accessModes:
+          - ReadWriteOnce
+        size: TO_BE_FIXED
+      replicaCount: 1
+      autoscaling:
+        enabled: false
+        #  minReplicas: 1
+        #  maxReplicas: 11
+        #  targetCPU: 50
+        #  targetMemory: 50
+    ruler:
+      enabled: true
+      logLevel: info
+      alertmanagers: [] # TO_BE_FIXED
+      evalInterval: 1m
+      config: {} #TO_BE_FIXED
+      replicaCount: 1
+      updateStrategyType: RollingUpdate
+      podManagementPolicy: OrderedReady
+      nodeSelector: {}
+      service:
+        type: ClusterIP
+        http:
+          port: 9090
+        grpc:
+          port: 10901
+      persistence:
+        enabled: true
+        accessModes:
+          - ReadWriteOnce
+        size: TO_BE_FIXED
+    metrics:
+      enabled: false
+      serviceMonitor:
+        enabled: false
+    volumePermissions:
+      enabled: false
+    minio:
+      enabled: false
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: thanos-config
+  name: thanos-config
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: thanos-config
+    version: 0.1.6
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: thanos-config
+  targetNamespace: lma
+  values:
+    objectStorage:
+      enabled: true
+      secretName: TO_BE_FIXED
+      rawConfig:
+        bucket: TO_BE_FIXED
+        endpoint: minio:9000
+        # only for minio
+        # access_key: TO_BE_FIXED
+        # secret_key: TO_BE_FIXED
+        # insecure: TO_BE_FIXED
+    sidecarsService:
+      enabled: false
+      type: NodePort
+      nodePort: 30007
+      name: TO_BE_FIXED
+      port: 30901
+      endpoints: [] # TO_BE_FIXED
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: prepare-etcd-secret
+  name: prepare-etcd-secret
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: prepare-etcd-secret
+    version: 0.2.0
+    origin: https://openinfradev.github.io/helm-repo
+  releaseName: prepare-etcd-secret
+  targetNamespace: lma
+  values:
+    image:
+      repository: harbor.taco-cat.xyz/tks/hyperkube
+      tag: v1.18.8
+    etcd:
+      certdir: /etc/kubernetes/pki/etcd
+      certfile: ca.crt
+      client_certfile: peer.crt
+      client_keyfile: peer.key
+    # master node의 label을 환경에 맞게 적어야함
+    # ex) 1.20< "node-role.kubernetes.io/master": ""
+    #     >1.20 "node-role.kubernetes.io/control-plane": ""
+    # ref. https://github.com/kubernetes/kubernetes/blob/master/CHANGELOG/CHANGELOG-1.20.md#urgent-upgrade-notes
+    nodeSelector:
+      "node-role.kubernetes.io/control-plane": ""
+    tolerations:
+      - key: "node-role.kubernetes.io/control-plane"
+        effect: "NoSchedule"
+        operator: "Exists"
+      - key: "node-role.kubernetes.io/master"
+        effect: "NoSchedule"
+        operator: "Exists"
+    deployer: "tks"
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: loki
+  name: loki
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: loki-distributed
+    version: 0.58.0
+    origin: https://grafana.github.io/helm-charts
+  releaseName: loki
+  targetNamespace: lma
+  values:
+    global:
+      clusterDomain: cluster.local # TO_BE_FIXED
+      dnsService: coredns
+    loki:
+      image:
+        registry: harbor.taco-cat.xyz
+        repository: tks/loki
+        tag: null
+      schemaConfig:
+        configs:
+        - from: "2020-09-07"
+          store: boltdb-shipper
+          object_store: s3
+          schema: v11
+          index:
+            prefix: loki_index_
+            period: 24h
+      storageConfig:
+        boltdb_shipper:
+          active_index_directory: /var/loki/index
+          cache_location: /var/loki/cache
+          cache_ttl: 24h         # Can be increased for faster performance over longer query periods, uses more disk space
+          shared_store: s3
+        aws:
+          s3: TO_BE_FIXED
+          bucketnames: tks-loki
+          s3forcepathstyle: true
+      structuredConfig:
+        limits_config:
+          ingestion_rate_mb: 25
+          ingestion_burst_size_mb: 50
+          max_streams_per_user: 0
+          max_global_streams_per_user: 0
+        table_manager:
+          retention_deletes_enabled: true
+          retention_period: TO_BE_FIXED
+    serviceMonitor.enabled: true
+    prometheusRule.enabled: true
+    ingester:
+      resources:
+        limits:
+          cpu: '4'
+          memory: 4Gi
+        requests:
+          cpu: 100m
+          memory: 250Mi
+      persistence:
+        enabled: true
+        inMemory: false
+        size: 100Gi
+    memcachedExporter.enabled: true
+    gateway:
+      image:
+        registry: harbor.taco-cat.xyz
+        repository: tks/nginx-unprivileged
+
+      nginxConfig:
+        httpSnippet: |-
+          client_max_body_size 50M;
+        serverSnippet: |-
+          client_max_body_size 50M;
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: lma-bucket
+  name: lma-bucket
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: ack-resources
+    version: v1.0.2
+  releaseName: lma-bucket
+  targetNamespace: taco-system
+  values:
+    tks:
+      iamRoles: [] #arn:aws:iam::482246953094:role/control-plane.cluster-api-provider-aws.sigs.k8s.io
+
+    s3:
+      enabled: true
+      buckets: [ ]

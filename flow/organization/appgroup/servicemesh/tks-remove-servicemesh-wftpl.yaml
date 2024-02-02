@@ -1,0 +1,135 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tks-remove-servicemesh
+  namespace: argo
+spec:
+  entrypoint: remove-tks-service-mesh
+  arguments:
+    parameters:
+    - name: app_group
+      value: "service-mesh"
+    - name: keycloak_url
+      value: ""
+    - name: organization_id
+      value: ""
+    #===============================
+    # For tks-info task
+    #===============================
+    - name: tks_api_url
+      value: "127.0.0.1"
+    - name: cluster_id
+      value: "Cabbead61"
+    - name: app_group_id
+      value: "Aabbead61"
+    - name: app_prefix
+      value: "{{workflow.parameters.cluster_id)}}"
+    - name: filter
+      value: "app={{workflow.parameters.cluster_id}}-{{workflow.parameters.app_group}}"
+    - name: base_repo_branch
+      value: "main"
+
+  # volumes:
+  # - name: tks-proto-vol
+  #   configMap:
+  #     name: tks-proto
+
+  templates:
+  #=========================================================
+  # Template Pipeline
+  #=========================================================
+  - name: remove-tks-service-mesh
+    steps:
+    - - name: remove-service-mech
+        templateRef:
+          name: remove-servicemesh-all
+          template: remove-start
+    - - name: kiali-delete-keycloak-client
+        templateRef:
+          name: keycloak-client
+          template: delete-client
+        arguments:
+          parameters:
+            - name: server_url
+              value: "{{ workflow.parameters.keycloak_url }}/auth"
+            - name: target_realm_name
+              value: "{{ workflow.parameters.organization_id }}"
+            - name: target_client_id
+              value: "{{ workflow.parameters.cluster_id }}-kiali"
+            - name: keycloak_credential_secret_name
+              value: "keycloak"
+            - name: keycloak_credential_secret_namespace
+              value: "keycloak"
+
+    - - name: jaeger-delete-keycloak-client
+        templateRef:
+          name: keycloak-client
+          template: delete-client
+        arguments:
+          parameters:
+            - name: server_url
+              value: "{{ workflow.parameters.keycloak_url }}/auth"
+            - name: target_realm_name
+              value: "{{ workflow.parameters.organization_id }}"
+            - name: target_client_id
+              value: "{{ workflow.parameters.cluster_id }}-gatekeeper-jaeger"
+            - name: keycloak_credential_secret_name
+              value: "keycloak"
+            - name: keycloak_credential_secret_namespace
+              value: "keycloak"
+
+    #- - name: updateTksInfo
+    #    templateRef:
+    #      name: delete-tks-app-group-info
+    #      template: deleteTksAppGroup
+
+
+  #=========================================================
+  # Template Definition
+  #=========================================================
+  - name: delete-ingress-temporary
+    inputs:
+      parameters:
+      - name: site_name
+    container:
+      name: delete-ingress-temporary
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+      - /bin/bash
+      - '-c'
+      - |
+        function log() {
+          level=$1
+          msg=$2
+          date=$(date '+%F %H:%M:%S')
+          echo "[$date] $level     $msg"
+        }
+
+        function delete_ingress() {
+          ingress_name=$1
+          namespace=$2
+
+          kube_params=""
+          if [[ -n "{{workflow.parameters.cluster_id}}" ]]; then
+            kube_secret=$(kubectl get secret -n {{workflow.parameters.cluster_id}} {{workflow.parameters.cluster_id}}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+            echo -e "kube_secret:\n$kube_secret" | head -n 5
+            cat <<< "$kube_secret" > /etc/kubeconfig
+            kube_params+="--kubeconfig=/etc/kubeconfig"
+          fi
+
+          kubectl $kube_params get ing $ingress_name -n $namespace
+          if [[ $? =~ 1 ]]; then
+            kubectl $kube_params delete ing $ingress_name -n $namespace
+            log "INFO" "${ingress_name} in ${namespace} successfully deleted."
+          fi
+        }
+
+        delete_ingress "grafana" "lma"
+        delete_ingress "kibana" "lma"
+        delete_ingress "kiali" "istio-system"
+      env:
+      - name: SITE_NAME
+        value: '{{inputs.parameters.site_name}}'
+    activeDeadlineSeconds: 900
+    retryStrategy:
+      limit: 2

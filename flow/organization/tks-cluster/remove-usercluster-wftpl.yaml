@@ -1,0 +1,388 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tks-remove-usercluster
+  namespace: argo
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+    - name: app_group_prefix
+      value: "tks-cluster"
+    - name: tks_api_url
+      value: "tks-info.tks.svc"
+    - name: cluster_id
+      value: "Cabbead61"
+    - name: cloud_account_id # will be not NULL if the cluster is multitenancy
+      value: "NULL"
+    - name: infra_provider
+      value: "aws"
+    - name: app_prefix
+      value: "{{workflow.parameters.cluster_id}}"
+    - name: filter
+      value: "app={{workflow.parameters.cluster_id}}-{{workflow.parameters.app_group_prefix}}"
+    - name: keycloak_url
+      value: '{{workflow.parameters.keycloak_url}}'
+    - name: contract_id
+      value: "P0010010a"
+
+  volumes:
+  - name: tks-proto-vol
+    configMap:
+      name: tks-proto
+  - name: kubeconfig-adm
+    secret:
+      secretName: tks-admin-kubeconfig-secret
+  - name: awsconfig
+    secret:
+      secretName: awsconfig-secret
+
+  templates:
+  - name: main
+    steps:
+    - - name: findInfraProvider
+        template: findInfraProvider
+        arguments:
+          parameters:
+            - name: cluster_id
+              value: "{{workflow.parameters.cluster_id}}"
+
+    - - name: disableAutoSync
+        template: disableAutoSync
+
+    - - name: deleteIngressControllerApp
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-ingress-nginx"
+
+    - - name: deleteClusterAutoscalerApp
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-cluster-autoscaler"
+        when: >-
+            {{steps.findInfraProvider.outputs.parameters.infra_provider}} != byoh
+
+    - - name: deleteClusterAutoscalerRbacApp
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-cluster-autoscaler-rbac"
+        when: >-
+            {{steps.findInfraProvider.outputs.parameters.infra_provider}} != byoh &&
+              {{steps.findInfraProvider.outputs.parameters.managed_cluster}} == false
+
+    - - name: delete-aws-cluster-autoscaler-iam
+        templateRef:
+          name: aws-cluster-autoscaler-iam
+          template: deleteIAMRole
+        arguments:
+          parameters:
+            - name: cloud_account_id
+              value: "{{ workflow.parameters.cloud_account_id }}"
+        when: >-
+            {{steps.findInfraProvider.outputs.parameters.infra_provider}} == aws &&
+              {{steps.findInfraProvider.outputs.parameters.managed_cluster}} == true
+
+    - - name: deleteMetricsServerApp
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-metrics-server"
+
+    #- - name: deleteKubedApp
+    #    templateRef:
+    #      name: delete-apps
+    #    template: DeleteAppsByName
+    #    arguments:
+    #      parameters:
+    #        - name: app_name
+    #          value: "{{workflow.parameters.app_prefix}}-kubed"
+
+    - - name: cleanupPVCs
+        template: cleanupPVCs
+
+    - - name: delete-internal-communication
+        templateRef:
+          name: manage-internal-communication
+          template: DeleteInternalCon
+        when: >-
+            ( {{steps.findInfraProvider.outputs.parameters.infra_provider}} == aws &&
+              {{steps.findInfraProvider.outputs.parameters.managed_cluster}} == false
+            )
+
+    - - name: deleteCsiDriverApp
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-aws-ebs-csi-driver"
+        when: >-
+            ( {{steps.findInfraProvider.outputs.parameters.infra_provider}} == aws &&
+              {{steps.findInfraProvider.outputs.parameters.managed_cluster}} == false
+            )
+
+    - - name: deleteLocalPathProvisionerApp
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-local-path-provisioner"
+        when: "{{steps.findInfraProvider.outputs.parameters.infra_provider}} == byoh"
+
+      - name: deleteS3ChartApp
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-s3-chart"
+        when: "{{steps.findInfraProvider.outputs.parameters.infra_provider}} == aws "
+
+    - - name: deleteS3ChartCrdApp
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-s3-chart-crds"
+        when: "{{steps.findInfraProvider.outputs.parameters.infra_provider}} == aws "
+
+    - - name: deleteCalicoController
+        template: deleteCalicoController
+        when: "{{steps.findInfraProvider.outputs.parameters.managed_cluster}} == false"
+
+    - - name: deleteCniAddons
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-tigera-operator"
+        when: "{{steps.findInfraProvider.outputs.parameters.managed_cluster}} == false"
+
+    - - name: deleteClusterArgoRolloutsApp
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+            - name: app_name
+              value: "{{workflow.parameters.app_prefix}}-argo-rollouts"
+
+    - - name: deleteClusterCR
+        template: deleteClusterCR
+        arguments:
+          parameters:
+            - name: target_namespace
+              value: "{{workflow.parameters.cluster_id}}"
+
+    - - name: deleteArgoCDAppGroup
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByLabel
+
+    - - name: deleteClusterRepo
+        templateRef:
+          name: tks-delete-cluster-repo
+          template: deleteClusterRepo
+
+    - - name: unset-keycloak-config
+        templateRef:
+          name: keycloak-client
+          template: delete-client
+        arguments:
+          parameters:
+            - name: server_url
+              value: "{{ workflow.parameters.keycloak_url }}"
+            - name: target_realm_name
+              value: "{{ workflow.parameters.contract_id }}"
+            - name: target_client_id
+              value: "{{ workflow.parameters.cluster_id}}-k8s-api"
+            - name: keycloak_credential_secret_name
+              value: "keycloak"
+            - name: keycloak_credential_secret_namespace
+              value: "keycloak"
+
+
+
+  #######################
+  # Template Definition #
+  #######################
+  - name: findInfraProvider
+    activeDeadlineSeconds: 300
+    inputs:
+      parameters:
+      - name: cluster_id
+    container:
+      name: 'createClusterRepo'
+      image: harbor.taco-cat.xyz/tks/ghcli-alpine:2.0.0
+      imagePullPolicy: IfNotPresent
+      command:
+      - /bin/bash
+      - -ecx
+      - |
+        GIT_SVC_HTTP=${GIT_SVC_URL%://*}
+        GIT_SVC_BASE_URL=${GIT_SVC_URL#*//}
+
+        git clone $GIT_SVC_HTTP://$(echo -n $TOKEN)@$GIT_SVC_BASE_URL/${USERNAME}/${CLUSTER_ID}.git
+
+        # Get cluster-api infra provider in the cluster
+        INFRA_PROVIDER="$(cat ${CLUSTER_ID}/${CLUSTER_ID}/tks-cluster/kustomization.yaml | grep /infra/ | awk -F \/ '{print $3}')"
+        echo ${INFRA_PROVIDER} | tee /mnt/out/infra_provider.txt
+
+        if [ "$INFRA_PROVIDER" = "aws" ]; then
+            eks_enabled=$(cat ${CLUSTER_ID}/${CLUSTER_ID}/tks-cluster/site-values.yaml  | grep eksEnabled | awk '{print $2}')
+            echo $eks_enabled | tee /mnt/out/managed_cluster.txt
+        fi
+      envFrom:
+        - secretRef:
+            name: "git-svc-token"
+      env:
+      - name: CLUSTER_ID
+        value: "{{inputs.parameters.cluster_id}}"
+      volumeMounts:
+        - name: out
+          mountPath: /mnt/out
+    volumes:
+      - name: out
+        emptyDir: { }
+    outputs:
+      parameters:
+      - name: infra_provider
+        valueFrom:
+          default: "Something wrong"
+          path: /mnt/out/infra_provider.txt
+      - name: managed_cluster
+        valueFrom:
+          default: "false"
+          path: /mnt/out/managed_cluster.txt
+
+  - name: disableAutoSync
+    container:
+      name: disable-auto-sync
+      image: harbor.taco-cat.xyz/tks/argocd-cli:v2.2.5
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          # Login to Argo CD server
+          ./argocd login $ARGO_SERVER --plaintext --insecure --username $ARGO_USERNAME \
+          --password $ARGO_PASSWORD
+
+          app_list=$(./argocd app list --output name | grep {{workflow.parameters.app_prefix}})
+          echo -e "App list:\n $app_list"
+          if [[ $? -eq 0 && -n $app_list ]]; then
+            # Disable auto-sync
+            echo "$app_list" | xargs -I '{}' ./argocd app set '{}' --sync-policy none
+          fi
+      envFrom:
+        - secretRef:
+            name: "decapod-argocd-config"
+
+  - name: cleanupPVCs
+    container:
+      name: cleanup-pvcs
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          kube_secret=$(kubectl get secret -n {{workflow.parameters.cluster_id}} {{workflow.parameters.cluster_id}}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+          echo -e "kube_secret:\n$kube_secret" | head -n 5
+          cat <<< "$kube_secret" > /etc/kubeconfig
+
+          kube_params+="--kubeconfig=/etc/kubeconfig"
+
+          echo "List of PVCs that will be deleted: "
+          kubectl $kube_params get ns | grep -v "NAME\|kube-system" | awk '{ print $1 }' | xargs -I '{}' kubectl get pvc -n '{}'
+          echo "======================================"
+
+          kubectl $kube_params get ns | grep -v "NAME\|kube-system" | awk '{ print $1 }' | xargs -I '{}' kubectl delete pvc --all -n '{}'
+
+          if [[ $? =~ 0 ]]; then
+            echo "All PVCs have been deleted successfully."
+          else
+            echo "Error occurred while cleaning up PVCs."
+            exit 1
+          fi
+
+  - name: deleteCalicoController
+    container:
+      name: delete-calico
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          kube_secret=$(kubectl get secret -n {{workflow.parameters.cluster_id}} {{workflow.parameters.cluster_id}}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+          echo -e "kube_secret:\n$kube_secret" | head -n 5
+          cat <<< "$kube_secret" > /etc/kubeconfig
+
+          kube_params+="--kubeconfig=/etc/kubeconfig"
+
+          kubectl $kube_params get apiserver.v1.operator.tigera.io | grep default
+          if [[ $? =~ 0 ]]; then
+            kubectl $kube_params delete apiserver.v1.operator.tigera.io default
+          else
+            echo "Error: installations.v1.operator.tigera.io 'default' was NOT found."
+            exit 1
+          fi
+
+          kubectl $kube_params get installations.v1.operator.tigera.io | grep default
+          if [[ $? =~ 0 ]]; then
+            kubectl $kube_params delete installations.v1.operator.tigera.io default
+          else
+            echo "Error: installations.v1.operator.tigera.io 'default' was NOT found."
+            exit 1
+          fi
+
+  - name: deleteClusterCR
+    inputs:
+      parameters:
+        - name: target_namespace
+    container:
+      name: delete-cluster-cr
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          kubectl get cl ${CLUSTER_NAME} -n ${TARGET_NAMESPACE}
+          if [[ $? =~ 0 ]]; then
+            kubectl delete cl ${CLUSTER_NAME} -n ${TARGET_NAMESPACE}
+
+            while (kubectl get cl ${CLUSTER_NAME} -n ${TARGET_NAMESPACE}); do
+              echo "Waiting for cluster CR to be deleted.."
+              sleep 2
+            done
+            echo "Cluster ${CLUSTER_NAME} was successfully deleted."
+          else
+            echo "Error: cluster ${CLUSTER_NAME} was NOT found."
+            exit 1
+          fi
+      env:
+        - name: TARGET_NAMESPACE
+          value: "{{inputs.parameters.target_namespace}}"
+        - name: CLUSTER_NAME
+          value: "{{workflow.parameters.cluster_id}}"

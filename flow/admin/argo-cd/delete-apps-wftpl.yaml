@@ -1,0 +1,130 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: delete-apps
+  namespace: argo
+spec:
+  entrypoint: DeleteAppsByLabel
+  arguments:
+    parameters:
+    # Filter to filter argocd apps (E.g., "app=lma")
+    # This is only for 'DeleteAppsByLabel' template
+    - name: filter
+      value: ""
+  templates:
+  - name: DeleteAppsByLabel
+    activeDeadlineSeconds: 900
+    container:
+      name: 'delete-apps-by-label'
+      image: harbor.taco-cat.xyz/tks/argocd-cli:v2.2.5
+      imagePullPolicy: IfNotPresent
+      command:
+      - /bin/bash
+      - -c
+      - |
+        # log into Argo CD server
+        ./argocd login $ARGO_SERVER --plaintext --insecure --username $ARGO_USERNAME \
+        --password $ARGO_PASSWORD
+
+        # Pre-check: validate if the label is correct
+        app_list=$(./argocd app list -l $FILTER --output name)
+        if [[ $? -eq 0 && -n $app_list ]]; then
+          echo "Found apps with label '$FILTER'.. Start deleting apps.."
+        else
+          echo "No such label: $FILTER. Skipping app removal.."
+          exit 1
+        fi
+
+        deleted=False
+
+        # Delete normal apps except operators and CRDs
+        app_list=$(./argocd app list -l $FILTER --output name | grep -v operator | grep -v crds)
+        if [[ $? -eq 0 && -n $app_list ]]; then
+          echo -e "[1st phase] Deleting apps:\n$app_list"
+          for app in $app_list; do
+            ./argocd app terminate-op $app || true
+          done
+          echo "$app_list" | xargs ./argocd app delete --cascade --propagation-policy background -y
+
+          until [ $(./argocd app list -l $FILTER --output name | grep -v operator | grep -v crds | wc -l) == 0 ]
+          do
+            echo "Waiting 20 secs for apps to be deleted.."
+            sleep 20
+          done 
+
+          echo "[1st phase] App deletion have been finished!"
+          deleted=True
+        else
+          echo "No apps found except operators. Skipping 1st phase.."
+        fi
+
+        # Delete operators and CRDs
+        app_list=$(./argocd app list -l $FILTER --output name)
+        if [[ $? -eq 0 && -n $app_list ]]; then
+          echo -e "[2nd phase] Deleting operators:\n$app_list"
+          echo "$app_list" | xargs ./argocd app terminate-op || true
+          echo "$app_list" | xargs ./argocd app delete --cascade --propagation-policy background -y
+
+          until [ $(./argocd app list -l $FILTER --output name | wc -l) == 0 ]
+          do
+            echo "Waiting 20 secs for apps to be deleted.."
+            sleep 20
+          done 
+
+          echo "[2nd phase] App deletion have been finished!"
+          deleted=True
+        else
+          echo "No operators or CRDs found. Skipping 2nd phase.."
+        fi
+
+        if [ $deleted != True ] ; then
+          echo "No apps have been deleted at all. Something wrong.."
+          exit 1
+        fi
+      envFrom:
+        - secretRef:
+            name: "decapod-argocd-config"
+      env:
+        - name: FILTER
+          value: "{{workflow.parameters.filter}}"
+
+  - name: DeleteAppsByName
+    activeDeadlineSeconds: 900
+    inputs:
+      parameters:
+      - name: app_name
+    container:
+      name: 'delete-apps-by-name'
+      image: harbor.taco-cat.xyz/tks/argocd-cli:v2.2.5
+      imagePullPolicy: IfNotPresent
+      command:
+      - /bin/bash
+      - -c
+      - |
+        # log into Argo CD server
+        ./argocd login $ARGO_SERVER --plaintext --insecure --username $ARGO_USERNAME \
+        --password $ARGO_PASSWORD
+
+        # Pre-check: validate if the app exists
+        if ! (./argocd app list --output name | grep -E "^$APP$"); then
+          echo "No such app: $APP. Skipping app removal.."
+          exit 1
+        fi
+
+        echo "Found app '$APP'. Start deleting it.."
+        ./argocd app terminate-op $APP || true
+        ./argocd app delete $APP --cascade --propagation-policy background -y
+
+        while (./argocd app list --output name | grep -E "^$APP$" )
+        do
+          echo "Waiting 20 secs for the app to be deleted.."
+          sleep 20
+        done
+
+        echo "App '$APP' have been deleted!"
+      envFrom:
+        - secretRef:
+            name: "decapod-argocd-config"
+      env:
+        - name: APP
+          value: "{{inputs.parameters.app_name}}"

@@ -1,0 +1,166 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: manage-internal-communication
+  namespace: argo
+spec:
+  entrypoint: deploy
+  arguments:
+    parameters:
+    - name: cluster_id
+      value: "Cc81dd656"
+    - name: cloud_account_id
+      value: "NULL"
+
+  volumes:
+    - name: kubeconfig-adm
+      secret:
+        secretName: tks-admin-kubeconfig-secret
+    - name: awsconfig
+      secret:
+        secretName: awsconfig-secret
+    - name: artifacts
+      configMap:
+        name: aws-artifacts
+        defaultMode: 0555
+
+  templates:
+  - name: deploy
+    dag:
+      tasks:
+      - name: create-securitygroup-for-internal-communication
+        template: CreateInternalCon
+        dependencies: []
+      - name: modify-resource-for-monitoring
+        template: FixResources4Prometheus
+        dependencies: []
+        
+  - name: CreateInternalCon
+    activeDeadlineSeconds: 1800
+    container:
+      image: harbor.taco-cat.xyz/tks/aws_kubectl:v2.0.0
+      command:
+      - /bin/bash
+      - -exc
+      - |
+        mkdir ~/.aws
+        cp /aws/* ~/.aws/
+        mkdir ~/.kube
+        cp /kube/value ~/.kube/config
+
+        # Use AWS STS temporary security credential if multi-tenancy
+        if [ "$CLOUD_ACCOUNT_ID" != "NULL" ]; then
+          ROLE_ARN=$(kubectl get awsri $CLOUD_ACCOUNT_ID-account-role -ojsonpath='{.spec.roleARN}')
+          aws sts assume-role --role-arn $ROLE_ARN --role-session-name "TKS-CreateInternalCon-$cluster_id" --output json | tee ~/assume-role-sts-credential.txt
+          export AWS_ACCESS_KEY_ID=$(cat ~/assume-role-sts-credential.txt | jq -r '.Credentials.AccessKeyId')
+          export AWS_SECRET_ACCESS_KEY=$(cat ~/assume-role-sts-credential.txt | jq -r '.Credentials.SecretAccessKey')
+          export AWS_SESSION_TOKEN=$(cat ~/assume-role-sts-credential.txt | jq -r '.Credentials.SessionToken')
+        fi
+
+        # Gether VPC info.   
+        VPC=$(kubectl get awscluster -n $cluster_id $cluster_id -o=jsonpath={.spec.network.vpc.id})
+        CIDR=$(kubectl get awscluster -n $cluster_id $cluster_id -o=jsonpath={.spec.network.vpc.cidrBlock})
+
+        # Create Security Group
+        SG=$(aws ec2 create-security-group --group-name taco-internal --description "Security group for interanl communication among nodes" --vpc-id $VPC  --output text)
+        # Set ingress rule
+        # - 2381  for kube-etcd metrics
+        # - 10249 for kube-proxy
+        aws ec2 authorize-security-group-ingress --group-id $SG --protocol tcp --port 2381 --cidr $CIDR
+        aws ec2 authorize-security-group-ingress --group-id $SG --protocol tcp --port 10249 --cidr $CIDR
+
+        # Add Security Group to all node in the VPC
+        for instance in `aws ec2 describe-instances --filters "Name=vpc-id,Values=$VPC" --output text --query "Reservations[].Instances[].InstanceId"`
+        do
+          current=$(aws ec2 describe-instance-attribute --attribute "groupSet" --instance-id $instance --output text --query "Groups[].GroupId")
+          aws ec2 modify-instance-attribute --instance-id $instance --groups $current $SG
+        done
+
+      env:
+      - name: cluster_id
+        value: "{{workflow.parameters.cluster_id}}"
+      - name: CLOUD_ACCOUNT_ID
+        value: "{{workflow.parameters.cloud_account_id}}"
+
+      volumeMounts:
+      - name: kubeconfig-adm
+        mountPath: "/kube"
+      - name: awsconfig
+        mountPath: "/aws"
+
+  - name: DeleteInternalCon
+    activeDeadlineSeconds: 1800
+    container:
+      image: harbor.taco-cat.xyz/tks/aws_kubectl:v2.0.0
+      command:
+      - /bin/bash
+      - -exc
+      - |
+        mkdir ~/.aws
+        cp /aws/* ~/.aws/
+        mkdir ~/.kube
+        cp /kube/value ~/.kube/config
+
+        # Use AWS STS temporary security credential if multi-tenancy
+        if [ "$CLOUD_ACCOUNT_ID" != "NULL" ]; then
+          ROLE_ARN=$(kubectl get awsri $CLOUD_ACCOUNT_ID-account-role -ojsonpath='{.spec.roleARN}')
+          aws sts assume-role --role-arn $ROLE_ARN --role-session-name "TKS-CreateInternalCon-$cluster_id" --output json | tee ~/assume-role-sts-credential.txt
+          export AWS_ACCESS_KEY_ID=$(cat ~/assume-role-sts-credential.txt | jq -r '.Credentials.AccessKeyId')
+          export AWS_SECRET_ACCESS_KEY=$(cat ~/assume-role-sts-credential.txt | jq -r '.Credentials.SecretAccessKey')
+          export AWS_SESSION_TOKEN=$(cat ~/assume-role-sts-credential.txt | jq -r '.Credentials.SessionToken')
+        fi
+
+        # Gether VPC info.
+        VPC=$(kubectl get awscluster -n $cluster_id $cluster_id -o=jsonpath={.spec.network.vpc.id})
+
+        # Get Security Group id
+        SG=$(aws ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC"  "Name=group-name,Values=taco-internal" --output text --query "SecurityGroups[].GroupId")
+
+        # Delete Security Group to all node in the VPC
+        for instance in `aws ec2 describe-instances --filters "Name=vpc-id,Values=$VPC" --output text --query "Reservations[].Instances[].InstanceId"`
+        do
+          current=$(aws ec2 describe-instance-attribute --attribute "groupSet" --instance-id $instance --output text --query "Groups[].GroupId")
+          newsgs=${current/$SG/}
+          aws ec2 modify-instance-attribute --instance-id $instance --groups $newsgs
+        done
+
+        # Delete Security Group 'taco-internal'
+        aws ec2 delete-security-group --group-id $SG
+      env:
+      - name: cluster_id
+        value: "{{workflow.parameters.cluster_id}}"
+      - name: CLOUD_ACCOUNT_ID
+        value: "{{workflow.parameters.cloud_account_id}}"
+
+      volumeMounts:
+      - name: kubeconfig-adm
+        mountPath: "/kube"
+      - name: awsconfig
+        mountPath: "/aws"
+
+  - name: FixResources4Prometheus
+    activeDeadlineSeconds: 1800
+    container:
+      image: harbor.taco-cat.xyz/tks/aws_kubectl:v1.0.0
+      command:
+      - /bin/bash
+      - -exc
+      - |
+        mkdir ~/.kube
+        cp /kube/value ~/.kube/config
+
+        kubectl get secret -n $cluster_id ${cluster_id}-tks-kubeconfig -o=jsonpath='{.data.value}' | base64 -d > ~/.kube/config
+
+        # FIX binding address of kubeproxy's metric server to 0.0.0.0
+        kubectl get cm -n kube-system kube-proxy -o yaml > /tmp/kube-proxy.cm.yaml
+        sed -i 's/metricsBindAddress: ""/metricsBindAddress: 0.0.0.0:10249/g' /tmp/kube-proxy.cm.yaml
+        kubectl apply -f /tmp/kube-proxy.cm.yaml
+
+      env:
+      - name: cluster_id
+        value: "{{workflow.parameters.cluster_id}}"
+      volumeMounts:
+      - name: kubeconfig-adm
+        mountPath: "/kube"
+      - name: awsconfig
+        mountPath: "/aws"

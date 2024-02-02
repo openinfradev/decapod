@@ -1,0 +1,145 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: delete-java-app
+  namespace: argo
+spec:
+  entrypoint: main
+  onExit: exit-handler
+  arguments:
+    parameters:
+    - name: target_cluster_id
+      value: "C011b88fa"
+    - name: app_name
+      value: "sample-petclinic"
+    - name: namespace
+      value: "{{workflow.parameters.app_name}}"
+    - name: asa_id
+      value: ""
+    - name: asa_task_id
+      value: ""
+    - name: organization_id
+      value: "ose4j7p39"
+    - name: tks_api_url
+      value: "http://tks-api.tks.svc:9110"
+
+  templates:
+  - name: exit-handler
+    steps:
+    - - name: notify-delete-failure
+        templateRef:
+          name: update-tks-asa-status
+          template: updateTksAsaStatus
+        arguments:
+          parameters:
+          - name: organization_id
+            value: "{{workflow.parameters.organization_id}}"
+          - name: asa_id
+            value: "{{workflow.parameters.asa_id}}"
+          - name: asa_task_id
+            value: "{{workflow.parameters.asa_task_id}}"
+          - name: status
+            value: "DELETE_FAILED"
+          - name: output
+            value: "{{workflow.outputs.parameters.delete_output_global}}"
+        when: "{{workflow.status}} != Succeeded"
+
+  - name: main
+    steps:
+    - - name: notify-delete-start
+        templateRef:
+          name: update-tks-asa-status
+          template: updateTksAsaStatus
+        arguments:
+          parameters:
+          - name: organization_id
+            value: "{{workflow.parameters.organization_id}}"
+          - name: asa_id
+            value: "{{workflow.parameters.asa_id}}"
+          - name: asa_task_id
+            value: "{{workflow.parameters.asa_task_id}}"
+          - name: status
+            value: "DELETING"
+          - name: output
+            value: ""
+    - - name: delete-app
+        template: delete-app
+    - - name: notify-delete-success
+        templateRef:
+          name: update-tks-asa-status
+          template: updateTksAsaStatus
+        arguments:
+          parameters:
+          - name: organization_id
+            value: "{{workflow.parameters.organization_id}}"
+          - name: asa_id
+            value: "{{workflow.parameters.asa_id}}"
+          - name: asa_task_id
+            value: "{{workflow.parameters.asa_task_id}}"
+          - name: status
+            value: "DELETE_SUCCESS"
+          - name: output
+            value: "{{steps.delete-app.outputs.parameters.delete_output}}"
+
+  #######################
+  # Template Definition #
+  #######################
+  - name: delete-app
+    volumes:
+    - name: out
+      emptyDir: {}
+    outputs:
+      parameters:
+      - name: delete_output
+        valueFrom:
+          path: /mnt/out/delete_output.log
+        globalName: delete_output_global
+    container:
+      image: harbor.taco-cat.xyz/tks/appserving-worker:latest
+      volumeMounts:
+      - name: out
+        mountPath: /mnt/out
+      command:
+      - /bin/sh
+      - '-exc'
+      - |
+        DELETE_LOG='/mnt/out/delete_output.log'
+
+        # Prepare kubeconfig
+        echo "Preparing kubeconfig for target cluster..." | tee -a $DELETE_LOG
+        KUBECONFIG_=$(kubectl get secret -n {{workflow.parameters.target_cluster_id}} {{workflow.parameters.target_cluster_id}}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+        if [[ -z "$KUBECONFIG_" ]]; then
+          echo "Couldn't get kubeconfig for cluster {{workflow.parameters.target_cluster_id}}" | tee -a $DELETE_LOG
+          exit 1
+        fi
+
+        echo "$KUBECONFIG_" > /etc/kubeconfig_temp
+        chmod 0600 /etc/kubeconfig_temp
+        export KUBECONFIG='/etc/kubeconfig_temp'
+
+        # Deleting
+        echo "Deleting app \"{{workflow.parameters.app_name}}\"..." | tee -a $DELETE_LOG
+        
+        # Delete rollout first
+        kubectl delete rollout {{workflow.parameters.app_name}} -n {{workflow.parameters.namespace}} 2> >(tee -a $DELETE_LOG >&2) || true
+        
+        # If make this strict, use asa_id as prefix to guarantee uniqueness of helm release.
+        helm delete --kubeconfig /etc/kubeconfig_temp -n {{workflow.parameters.namespace}} {{workflow.parameters.app_name}} 2> >(tee -a $DELETE_LOG >&2) || true
+        if [[ $? =~ 0 ]]; then
+          echo "App {{workflow.parameters.app_name}} was deleted successfully."
+        else
+          echo "Error occurred while deleting app." | tee -a $DELETE_LOG
+          exit 1
+        fi
+
+        # Delete preview svc and namespace
+        kubectl delete service --all -n {{workflow.parameters.namespace}} 2> >(tee -a $DELETE_LOG >&2) || true
+        ## Do not delete ns for now
+        # kubectl delete ns {{workflow.parameters.namespace}} || true
+        
+        echo "App {{workflow.parameters.app_name}} was deleted successfully." | tee -a $DELETE_LOG
+
+        # Just for debug
+        # If there's any case where the release is not deleted normally,
+        # then extra validation will be required.
+        # helm list --kubeconfig /etc/kubeconfig_temp -n {{workflow.parameters.namespace}}

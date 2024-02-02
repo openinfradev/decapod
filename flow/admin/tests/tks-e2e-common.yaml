@@ -1,0 +1,62 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tks-e2e-test-common
+  namespace: argo
+spec:
+  arguments:
+    parameters:
+    - name: tks_api_url
+      value: "http://tks-api-cicd.taco-cat.xyz"
+
+  templates:
+  - name: generate-names
+    inputs:
+      parameters:
+      - name: postfix
+    container:
+      image: harbor.taco-cat.xyz/tks/centos:centos7
+      command:
+        - /bin/bash
+        - '-exc'
+        - |
+          CL_NAME="ec-$(date "+%Y-%m%d-%H%M")"
+          CT_NAME="eo-$(date "+%Y-%m%d-%H%M")"
+
+          echo $CL_NAME | tee /mnt/out/cluster_name.txt
+          echo $CT_NAME | tee /mnt/out/organization_name.txt
+      volumeMounts:
+        - name: out
+          mountPath: /mnt/out
+    volumes:
+      - name: out
+        emptyDir: { }
+    outputs:
+      parameters:
+      - name: cluster-name
+        valueFrom:
+          default: "Something wrong"
+          path: /mnt/out/cluster_name.txt
+      - name: organization-name
+        valueFrom:
+          default: "Something wrong"
+          path: /mnt/out/organization_name.txt
+
+  - name: notify-slack
+    container:
+      image: harbor.taco-cat.xyz/tks/centos:centos7
+      env:
+      - name: SLACK_WEBHOOK_URL
+        valueFrom:
+          secretKeyRef:
+            name: tks-slack-webhook-secret
+            key: url
+      command:
+        - /bin/bash
+        - '-exc'
+        - |
+          raw_dur_secs={{workflow.duration}}
+          dur_secs=${raw_dur_secs%.*}
+          duration=$(printf '%dh:%dm:%ds\n' $((dur_secs/3600)) $((dur_secs%3600/60)) $((dur_secs%60)))
+
+          curl -X POST -H 'Content-type: application/json' --data "{\"text\": \"**************** E2E Test Result ****************\nWorkflow: {{workflow.name}}\nStatus: {{workflow.status}}\nDuration: `echo $duration`\" }" $SLACK_WEBHOOK_URL

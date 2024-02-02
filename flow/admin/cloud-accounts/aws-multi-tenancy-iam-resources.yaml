@@ -1,0 +1,137 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tks-aws-multi-tenancy-iam-resources
+  namespace: argo
+spec:
+  entrypoint: bootstrapIam
+  arguments:
+    parameters:
+    - name: aws_region
+      value: "ap-northeast-2"
+    - name: aws_account_id
+      value: "NULL"
+    - name: aws_access_key_id
+      value: "NULL"
+    - name: aws_secret_access_key
+      value: "NULL"
+    - name: aws_session_token
+      value: "NULL"
+
+  templates:
+  - name: bootstrapIam
+    activeDeadlineSeconds: 300
+    inputs:
+      parameters:
+      - name: command # "create" or "delete"
+    container:
+      name: provisioner
+      image: harbor.taco-cat.xyz/tks/tks-aws:v1.0.3
+      imagePullPolicy: IfNotPresent
+      command:
+      - /bin/bash
+      - -ecx
+      - |
+
+        echo $AWS_SESSION_TOKEN
+        if [ "$AWS_SESSION_TOKEN" = "NULL" ]; then
+            unset AWS_SESSION_TOKEN
+        fi
+        echo $AWS_SESSION_TOKEN || true
+
+        echo "apiVersion: bootstrap.aws.infrastructure.cluster.x-k8s.io/v1beta1
+        kind: AWSIAMConfiguration
+        spec:
+          eks:
+            iamRoleCreation: true
+            managedMachinePool:
+              disable: false
+              extraPolicyAttachments:
+              - \"arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy\"
+              - \"arn:aws:iam::aws:policy/AmazonS3FullAccess\"
+            fargate:
+              disable: true
+          nodes:
+             extraPolicyAttachments:
+             - \"arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy\"
+             - \"arn:aws:iam::aws:policy/AmazonS3FullAccess\"
+          clusterAPIControllers:
+            disabled: false
+            trustStatements:
+            - Action:
+              - \"sts:AssumeRole\"
+              Effect: \"Allow\"
+              Principal:
+                AWS:
+                - \"arn:aws:iam::${TKS_AWS_ACCOUNT_ID}:user/${TKS_AWS_USER}\"
+            extraStatements:
+            - Action:
+              - \"ec2:DescribeInstanceAttribute\"
+              - \"iam:ListOpenIDConnectProviders\"
+              - \"iam:GetOpenIDConnectProvider\"
+              - \"iam:CreateOpenIDConnectProvider\"
+              - \"iam:TagOpenIDConnectProvider\"
+              - \"iam:CreatePolicy\"
+              - \"iam:GetPolicy\"
+              - \"iam:AttachRolePolicy\"
+              - \"iam:DetachRolePolicy\"
+              - \"iam:CreateRole\"
+              - \"iam:DeleteRole\"
+              - \"cloudformation:*\"
+              - \"autoscaling:DescribeAccountLimits\"
+              - \"cloudformation:DescribeAccountLimits\"
+              - \"cloudwatch:DescribeAlarmsForMetric\"
+              - \"cloudwatch:DescribeAlarms\"
+              - \"cloudwatch:GetMetricData\"
+              - \"cloudwatch:GetMetricStatistics\"
+              - \"dynamodb:DescribeLimits\"
+              - \"elasticloadbalancing:DescribeAccountLimits\"
+              - \"iam:GetAccountSummary\"
+              - \"kinesis:DescribeLimits\"
+              - \"organizations:DescribeAccount\"
+              - \"organizations:DescribeOrganization\"
+              - \"organizations:ListAWSServiceAccessForOrganization\"
+              - \"rds:DescribeAccountAttributes\"
+              - \"route53:GetAccountLimit\"
+              - \"tag:GetTagKeys\"
+              - \"tag:GetTagValues\"
+              - \"servicequotas:GetAssociationForServiceQuotaTemplate\"
+              - \"servicequotas:GetAWSDefaultServiceQuota\"
+              - \"servicequotas:GetRequestedServiceQuotaChange\"
+              - \"servicequotas:GetServiceQuota\"
+              - \"servicequotas:GetServiceQuotaIncreaseRequestFromTemplate\"
+              - \"servicequotas:ListAWSDefaultServiceQuotas\"
+              - \"servicequotas:ListRequestedServiceQuotaChangeHistory\"
+              - \"servicequotas:ListRequestedServiceQuotaChangeHistoryByQuota\"
+              - \"servicequotas:ListServices\"
+              - \"servicequotas:ListServiceQuotas\"
+              - \"servicequotas:ListServiceQuotaIncreaseRequestsInTemplate\"
+              - \"servicequotas:ListTagsForResource\"
+              Effect: \"Allow\"
+              Resource:
+              - \"*\"" | envsubst > bootstrap-manager-account.yaml
+
+          cat bootstrap-manager-account.yaml
+          clusterawsadm bootstrap iam "{{ inputs.parameters.command }}"-cloudformation-stack --config bootstrap-manager-account.yaml
+
+      env:
+      - name: AWS_SESSION_TOKEN
+        value: "{{workflow.parameters.aws_session_token}}"
+      - name: AWS_ACCESS_KEY_ID
+        value: "{{workflow.parameters.aws_access_key_id}}"
+      - name: AWS_SECRET_ACCESS_KEY
+        value: "{{workflow.parameters.aws_secret_access_key}}"
+      - name: AWS_ACCOUNT_ID
+        value: "{{workflow.parameters.aws_account_id}}"
+      - name: AWS_REGION
+        value: "{{workflow.parameters.aws_region}}"
+      - name: TKS_AWS_ACCOUNT_ID
+        valueFrom:
+          secretKeyRef:
+            name: awsconfig-secret
+            key: AWS_ACCOUNT_ID
+      - name: TKS_AWS_USER
+        valueFrom:
+          secretKeyRef:
+            name: awsconfig-secret
+            key: AWS_USER

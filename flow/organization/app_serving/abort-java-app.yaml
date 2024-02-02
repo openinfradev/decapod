@@ -1,0 +1,289 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: abort-java-app
+  namespace: argo
+spec:
+  entrypoint: main
+  onExit: exit-handler
+  arguments:
+    parameters:
+    - name: target_cluster_id
+      value: "C011b88fa"
+    - name: app_name
+      value: "sample-petclinic"
+    - name: namespace
+      value: "{{workflow.parameters.app_name}}"
+    - name: asa_id
+      value: ""
+    - name: asa_task_id
+      value: ""
+    - name: organization_id
+      value: "ose4j7p39"
+    - name: strategy
+      value: "blue-green"
+    # tks_info service URL
+    - name: tks_api_url
+      value: "http://tks-api.tks.svc:9110"
+
+  templates:
+  - name: exit-handler
+    steps:
+    - - name: notify-abort-failure
+        templateRef:
+          name: update-tks-asa-status
+          template: updateTksAsaStatus
+        arguments:
+          parameters:
+          - name: organization_id
+            value: "{{workflow.parameters.organization_id}}"
+          - name: asa_id
+            value: "{{workflow.parameters.asa_id}}"
+          - name: asa_task_id
+            value: "{{workflow.parameters.asa_task_id}}"
+          - name: status
+            value: "ABORT_FAILED"
+          - name: output
+            value: "{{workflow.outputs.parameters.abort_output_global}}"
+        when: "{{workflow.status}} != Succeeded"
+
+  - name: main
+    steps:
+    - - name: notify-abort-start
+        templateRef:
+          name: update-tks-asa-status
+          template: updateTksAsaStatus
+        arguments:
+          parameters:
+          - name: organization_id
+            value: "{{workflow.parameters.organization_id}}"
+          - name: asa_id
+            value: "{{workflow.parameters.asa_id}}"
+          - name: asa_task_id
+            value: "{{workflow.parameters.asa_task_id}}"
+          - name: status
+            value: "ABORTING"
+          - name: output
+            value: ""
+    - - name: abort-app
+        template: abort-app
+    ## Stage for updating preview endpoint to 'N/A'
+    ## All other values shouldn't be updated.
+    ## (These values for endpoint & helm_revision are discarded by the API)
+    - - name: update-endpoint-url
+        templateRef:
+          name: update-tks-asa-endpoint
+          template: updateTksAsaEndpoint
+        arguments:
+          parameters:
+          - name: organization_id
+            value: "{{workflow.parameters.organization_id}}"
+          - name: asa_id
+            value: "{{workflow.parameters.asa_id}}"
+          - name: asa_task_id
+            value: "{{workflow.parameters.asa_task_id}}"
+          - name: endpoint
+            value: ""
+          - name: preview_endpoint
+            value: "N/A"
+          - name: helm_revision
+            value: 0
+    - - name: notify-abort-success
+        templateRef:
+          name: update-tks-asa-status
+          template: updateTksAsaStatus
+        arguments:
+          parameters:
+          - name: organization_id
+            value: "{{workflow.parameters.organization_id}}"
+          - name: asa_id
+            value: "{{workflow.parameters.asa_id}}"
+          - name: asa_task_id
+            value: "{{workflow.parameters.asa_task_id}}"
+          - name: status
+            value: "ABORT_SUCCESS"
+          - name: output
+            value: "{{steps.abort-app.outputs.parameters.abort_output}}"
+
+  #######################
+  # Template Definition #
+  #######################
+
+  - name: abort-app
+    volumes:
+    - name: out
+      emptyDir: {}
+    outputs:
+      parameters:
+      - name: abort_output
+        valueFrom:
+          path: /mnt/out/abort_output.log
+        globalName: abort_output_global
+    container:
+      image: harbor.taco-cat.xyz/tks/appserving-worker:latest
+      volumeMounts:
+      - name: out
+        mountPath: /mnt/out
+      command:
+      - /bin/sh
+      - '-exc'
+      - |
+        ABORT_LOG='/mnt/out/abort_output.log'
+        app_name={{workflow.parameters.app_name}}
+        ns={{workflow.parameters.namespace}}
+        strategy={{workflow.parameters.strategy}}
+
+        # Prepare kubeconfig
+        echo "Preparing kubeconfig for target cluster..." | tee -a $ABORT_LOG
+        KUBECONFIG_=$(kubectl get secret -n {{workflow.parameters.target_cluster_id}} {{workflow.parameters.target_cluster_id}}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+        if [[ -z "$KUBECONFIG_" ]]; then
+          echo "Couldn't get kubeconfig for cluster {{workflow.parameters.target_cluster_id}}" | tee -a $ABORT_LOG
+          exit 1
+        fi
+
+        echo "$KUBECONFIG_" > /etc/kubeconfig_temp
+        chmod 0600 /etc/kubeconfig_temp
+        export KUBECONFIG='/etc/kubeconfig_temp'
+
+
+
+        #==========================================================
+        # function: check_rollout_phase (Degraded)
+        #==========================================================
+        function check_rollout_phase() {
+          # check if abort is completed
+          rollout_phase=$1
+          rollout_status=$2
+          app_name={{workflow.parameters.app_name}}
+          abort_done=false
+          for i in `seq 1 10`
+          do
+            phase=$(kubectl get rollout ${app_name} -n {{workflow.parameters.namespace}} -o jsonpath='{.status.phase}')
+            ro_stat=$(kubectl argo rollouts status ${app_name} -n {{workflow.parameters.namespace}} --timeout 2s | cut -d' ' -f1 || true)
+
+            if [ "$phase" == "$rollout_phase" ] && [ "$ro_stat" == "$rollout_status" ]; then
+              echo "'Abort' request completed successfully." | tee -a $ABORT_LOG
+              abort_done=true
+              break
+            else
+              echo "Waiting for 'abort' to be done.. sleeping 3 secs.."
+              sleep 3
+            fi
+          done
+
+          if [ "$abort_done" = false ]; then
+            echo "Timed out waiting for 'abort' to be done.." | tee -a $ABORT_LOG
+            exit 1
+          fi
+        }
+
+
+
+        #==========================================================
+        # function: check_rollout_replicas
+        #==========================================================
+        function check_rollout_replicas() {
+          # Check num of replicas
+          ready=false
+          SLEEP_INTERVAL=5
+          for i in `seq 1 15`
+          do
+            replicas=$(kubectl get rollout/{{workflow.parameters.app_name}} -n {{workflow.parameters.namespace}} -o jsonpath='{.status.replicas}')
+            available_repls=$(kubectl get rollout/{{workflow.parameters.app_name}} -n {{workflow.parameters.namespace}} -o jsonpath='{.status.availableReplicas}')
+
+            if [ -z "$replicas" ]; then
+              echo "Failed to get number of replicas. Exiting workflow.." | tee -a $ABORT_LOG
+              exit 1
+            fi
+
+            # check if replicas == availableReplicas
+            if [ "$replicas" == "$available_repls" ]; then
+              echo "All replicas are available. Abort is successful!" | tee -a $ABORT_LOG
+              ready=true
+              break
+            fi
+            sleep $SLEEP_INTERVAL
+          done  # End of FOR loop #
+
+          if [ "$ready" = false ]; then
+            echo "Timed out waiting for abort to be done.." | tee -a $ABORT_LOG
+            exit 1
+          fi
+        }
+
+
+
+        #==========================================================
+        # Write revision
+        #==========================================================
+        function write_revision() {
+          # Writing helm release info to file.
+          revision=$( (helm history {{workflow.parameters.app_name}} --kubeconfig /etc/kubeconfig_temp -n {{workflow.parameters.namespace}} | grep deployed | cut -d' ' -f1) 2> >(tee -a $ABORT_LOG >&2) )
+          
+          # Cmds with pipe doesn't catch correct exit code, so we need to check it somehow.
+          if [ -z "$revision" ]; then
+            echo "Failed to get helm release revision. Exiting workflow.." | tee -a $ABORT_LOG
+            exit 1
+          fi
+
+          revision=$((revision - 1))
+
+          # Debug revision number
+          echo "Deployed revision number: $revision"
+          echo $revision > /mnt/out/revision
+        }
+
+
+
+        #==========================================================
+        # Start aborting Rollout
+        #==========================================================
+        echo "Starting abort process..." | tee -a $ABORT_LOG
+
+        # Check if rollout is waiting for promotion
+        if (kubectl argo rollouts status ${app_name} -n $ns --timeout 2s | grep Paused) ||
+          (kubectl argo rollouts status ${app_name} -n $ns --timeout 2s | grep Degraded)
+        then
+          echo "Rollout is in Paused state. Starting abort process.." | tee -a $ABORT_LOG
+        else
+          echo "Error: Rollout is NOT in Paused state. Exiting.." | tee -a $ABORT_LOG
+          exit 1
+        fi
+
+
+        # Perform abort
+        kubectl argo rollouts abort ${app_name} -n $ns
+
+
+
+        #==========================================================
+        # check abort finished (Degraded)
+        #==========================================================
+        check_rollout_phase "Degraded" "Degraded"
+
+
+
+        #==========================================================
+        # check replicas
+        #==========================================================
+        check_rollout_replicas
+
+
+        # TODO: Is just "undoing without revision" not enough?
+        #==========================================================
+        # undo to the latest active revision
+        #==========================================================
+        revision=$(kubectl argo rollouts get rollout ${app_name} -n $ns | grep -v Images |  grep -m 1 -B 1 -E "stable|active" | grep revision | cut -d':' -f2)
+        if [ -z $revision ]; then
+          echo "Failed to get number of revisions. Exiting workflow.." | tee -a $ABORT_LOG
+          exit 1
+        fi
+        kubectl argo rollouts undo $app_name -n $ns --to-revision=$revision
+
+
+
+        #==========================================================
+        # check undo finished (Healthy)
+        #==========================================================
+        check_rollout_phase "Healthy" "Healthy"
+

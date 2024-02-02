@@ -1,0 +1,58 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tks-validate-usercluster
+  namespace: argo
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+    - name: cluster_id
+      value: "C011b88fa"
+    - name: sonobuoy_mode
+      value: "quick"
+  templates:
+  - name: main
+    steps:
+      - - name: validate-cluster
+          template: run-sonobuoy
+          arguments:
+            parameters:
+              - name: cluster_id
+                value: "{{workflow.parameters.cluster_id}}"
+              - name: sonobuoy_mode
+                value: "{{workflow.parameters.sonobuoy_mode}}"
+
+  - name: run-sonobuoy
+    inputs:
+      parameters:
+        - name: cluster_id
+        - name: sonobuoy_mode
+          value: "quick"
+    container:
+      name: sonobuoy
+      image: harbor.taco-cat.xyz/tks/sonobuoy-worker
+      command:
+        - /bin/bash
+        - '-exc'
+        - |
+          KUBECONFIG_=$(kubectl get secret -n {{inputs.parameters.cluster_id}} {{inputs.parameters.cluster_id}}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+          cat <<< "$KUBECONFIG_" > /etc/kubeconfig_temp
+          export KUBECONFIG='/etc/kubeconfig_temp'
+
+          kubectl get po -A
+
+          sonobuoy run --mode {{inputs.parameters.sonobuoy_mode}} --kubernetes-version latest --e2e-parallel 30 --wait
+          sonobuoy retrieve
+          result_file=$(ls *sonobuoy*.tar.gz)
+          sonobuoy results $result_file
+          echo "\n***** Detailed results *****\n"
+          sonobuoy results --mode detailed $result_file
+
+          status=$(sonobuoy status)
+          if grep -q "failed" <<< "$status"; then
+            echo "Sonobuoy e2e test failed!"
+            exit 1
+          fi
+
+          sonobuoy delete --all --wait
