@@ -1,0 +1,205 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: import-tks-usercluster
+  namespace: argo
+spec:
+  entrypoint: deploy
+  arguments:
+    parameters:
+    - name: tks_api_url
+      value: "http://tks-api.tks.svc:9110"
+    - name: template_name
+      value: "aws-reference"
+    - name: contract_id
+      value: "P0010010a"
+    - name: cluster_id
+      value: "C011b88fa"
+    - name: kubeconfig
+      value: "KUBECONFIG_string"
+    - name: git_account
+      value: "tks"
+    - name: keycloak_url
+      value: "keycloakUrl"
+    - name: cloud_account_id
+      value: "NULL"
+    - name: base_repo_branch
+      value: "main"
+
+  volumes:
+  - name: kubeconfig-adm
+    secret:
+      secretName: tks-admin-kubeconfig-secret
+  - name: artifacts
+    configMap:
+      name: aws-artifacts
+      defaultMode: 0555
+  - name: tks-proto-vol
+    configMap:
+      name: tks-proto
+  - name: awsconfig
+    secret:
+      secretName: awsconfig-secret
+      
+  templates:
+  - name: deploy
+    steps:
+    - - name: tks-get-cluster-info
+        templateRef:
+          name: tks-get-cluster
+          template: getTksCluster
+
+    - - name: tks-create-cluster-repo
+        templateRef:
+          name: tks-create-cluster-repo
+          template: main
+        arguments:
+          parameters:
+            - name: cluster_info
+              value: "{{steps.tks-get-cluster-info.outputs.parameters.cluster_info}}"
+        when: "{{steps.tks-get-cluster-info.outputs.parameters.cluster_type}} != ADMIN"
+
+    - - name: import-cluster
+        template: import-cluster
+        arguments:
+          parameters:
+            - name: cluster_id
+              value: "{{ workflow.parameters.cluster_id }}"
+            - name: kubeconfig 
+              value: "{{ workflow.parameters.kubeconfig }}"
+
+    - - name: render-manifests
+        templateRef:
+          name: event-gitea-render-manifests
+          template: main
+        arguments:
+          parameters:
+            - name: decapod_site_repo
+              value: "{{ workflow.parameters.git_account }}/{{ workflow.parameters.cluster_id }}"
+            - name: base_repo_branch
+              value: "{{ workflow.parameters.base_repo_branch }}"
+        when: "{{steps.tks-get-cluster-info.outputs.parameters.cluster_type}} != ADMIN"
+
+    - - name: init-cluster-for-tks
+        template: init-cluster-for-tks
+        arguments:
+          parameters:
+            - name: cluster_id
+              value: "{{ workflow.parameters.cluster_id }}"
+            - name: infra_provider
+              value: "AWS"
+            - name: cloud_account_id
+              value: "NULL"
+            - name: keycloak_url
+              value: "{{ workflow.parameters.keycloak_url }}"
+            - name: contract_id
+              value: "{{ workflow.parameters.contract_id }}"
+
+
+  #######################
+  # Template Definition #
+  #######################
+
+  - name: import-cluster
+    inputs:
+      parameters:
+        - name: cluster_id
+        - name: kubeconfig
+    container:
+      name: cluster-init
+      image: harbor.taco-cat.xyz/tks/python_kubectl_argo:v1.1.0
+      command:
+        - /bin/bash
+        - '-exc'
+        - |
+          cp /kube/value kubeconfig_adm
+          export KUBECONFIG=kubeconfig_adm
+
+          echo $KUBECONFIG_IMPORT | base64 -d | tee kubeconfig_$CLUSTER_ID
+
+          kubectl --kubeconfig kubeconfig_$CLUSTER_ID get node | grep -v NAME
+          if [[ $? != 0 ]]; then
+            echo "ERROR - invalid kubernetes nodes"
+            exit 1
+          fi
+
+          cat <<EOF > $CLUSTER_ID_namespace.yaml
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            labels:
+              name: $CLUSTER_ID
+            name: $CLUSTER_ID
+          EOF
+          kubectl apply -f $CLUSTER_ID_namespace.yaml
+
+          #kubectl delete secret $CLUSTER_ID-tks-kubeconfig -n $CLUSTER_ID
+          kubectl create secret generic $CLUSTER_ID-tks-kubeconfig -n $CLUSTER_ID --from-file=value=kubeconfig_$CLUSTER_ID
+
+      volumeMounts:
+      - name: kubeconfig-adm
+        mountPath: "/kube"
+      env:
+      - name: CLUSTER_ID
+        value: "{{ inputs.parameters.cluster_id }}"
+      - name: KUBECONFIG_IMPORT
+        value: "{{ inputs.parameters.kubeconfig}}"
+
+  - name: init-cluster-for-tks
+    inputs:
+      parameters:
+        - name: cluster_id
+    container:
+      name: cluster-init
+      image: harbor.taco-cat.xyz/tks/python_kubectl_argo:v1.1.0
+      command:
+        - /bin/bash
+        - '-exc'
+        - |
+          cp /kube/value kubeconfig_adm
+          export KUBECONFIG=kubeconfig_adm
+
+          KUBECONFIG_WORKLOAD=$(kubectl get secret -n $CLUSTER_ID $CLUSTER_ID-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+          cat <<< "$KUBECONFIG_WORKLOAD" > kubeconfig_workload
+
+          for worker in `kubectl --kubeconfig=kubeconfig_workload get no --show-labels | awk '{print $1 }' | grep -v control-plane | grep -v NAME `
+          do
+            kubectl --kubeconfig=kubeconfig_workload label node ${worker} taco-lma=enabled taco-ingress-gateway=enabled taco-egress-gateway=enabled servicemesh=enabled --overwrite
+          done
+
+          export KUBECONFIG=kubeconfig_workload
+          cat <<EOF > taco-system.yaml
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            labels:
+              name: taco-system
+            name: taco-system
+          EOF
+          kubectl apply -f taco-system.yaml
+
+          argocd login --insecure --plaintext $ARGO_SERVER --username $ARGO_USERNAME --password $ARGO_PASSWORD
+          CLUSTER_CONTEXT=$(kubectl config current-context)
+
+          while [ $(kubectl get no | wc -l) == 0 ]
+          do
+              echo "Wait for cluster is ready (1s)"
+              sleep 1
+          done
+
+          if [ $(argocd cluster list | grep \ $CLUSTER_ID\ | wc -l ) == 0 ]; then
+              argocd cluster add $CLUSTER_CONTEXT --name $CLUSTER_ID --upsert
+          else
+              echo "Warning: $1 is already registered on argo-cd server. If unintended, it may occure woring operations."
+          fi
+
+      volumeMounts:
+      - name: kubeconfig-adm
+        mountPath: "/kube"
+      envFrom:
+      - secretRef:
+          name: "decapod-argocd-config"
+      env:
+      - name: CLUSTER_ID
+        value: "{{ inputs.parameters.cluster_id }}"
+

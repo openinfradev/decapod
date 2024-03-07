@@ -1,0 +1,265 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tks-create-cluster-repo
+  namespace: argo
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: contract_id
+        value: "contract_uuid"
+      - name: cluster_id
+        value: "cluster_uuid"
+      - name: template_name
+        value: "aws-reference"
+      - name: cloud_account_id
+        value: "NULL"
+
+  templates:
+    - name: createClusterRepo
+      activeDeadlineSeconds: 300
+      inputs:
+        parameters:
+          - name: cluster_info
+      container:
+        name: "createClusterRepo"
+        image: harbor.taco-cat.xyz/tks/ghcli-yq:1.0.0
+        imagePullPolicy: IfNotPresent
+        command:
+          - /bin/bash
+          - -ecx
+          - |
+            function gh_create_repo() {
+                echo $TOKEN | gh auth login --with-token
+
+                gh repo create ${USERNAME}/${CLUSTER_ID} --public --confirm
+                gh repo create ${USERNAME}/${CLUSTER_ID}-manifests --public --confirm
+            }
+
+            function gitea_create_repo() {
+                curl -X 'POST' $GIT_SVC_HTTP://${GIT_SVC_BASE_URL}/api/v1/orgs/${USERNAME}/repos?token=${TOKEN} -H 'accept: application/json' -H 'Content-Type: application/json' -d "{ \"name\": \"${CLUSTER_ID}\"}"
+                curl -X 'POST' $GIT_SVC_HTTP://${GIT_SVC_BASE_URL}/api/v1/orgs/${USERNAME}/repos?token=${TOKEN} -H 'accept: application/json' -H 'Content-Type: application/json' -d "{ \"name\": \"${CLUSTER_ID}-manifests\"}"
+
+                export ARGO_TOKEN="Bearer $(kubectl -n argo get secret $SA_TOKEN -o=jsonpath='{.data.token}' | base64 --decode)"
+                curl -X 'POST' \
+                  "${GIT_SVC_HTTP}://${GIT_SVC_BASE_URL}/api/v1/repos/${USERNAME}/${CLUSTER_ID}/hooks?token=${TOKEN}" \
+                  -H 'accept: application/json' \
+                  -H 'Content-Type: application/json' \
+                  -d "{
+                  \"active\": true,
+                  \"branch_filter\": \"main\",
+                  \"config\": {
+                      \"content_type\": \"json\",
+                      \"url\": \"http://argo-workflows-operator-server.argo:2746/api/v1/events/argo/gitea-webhook\"
+                  },
+                  \"events\": [
+                    \"push\"
+                  ],
+                  \"type\": \"gitea\",
+                  \"authorization_header\": \"${ARGO_TOKEN}\"
+                }"
+            }
+
+            GIT_SVC_HTTP=${GIT_SVC_URL%://*}
+            GIT_SVC_BASE_URL=${GIT_SVC_URL#*//}
+
+            if [ "$GIT_SVC_TYPE" = "gitea" ];then
+                gitea_create_repo
+            else
+                gh_create_repo
+            fi
+
+            git clone $GIT_SVC_HTTP://$(echo -n $TOKEN)@${GIT_SVC_BASE_URL}/${USERNAME}/${CONTRACT_ID}.git
+            git clone $GIT_SVC_HTTP://$(echo -n $TOKEN)@${GIT_SVC_BASE_URL}/${USERNAME}/${CLUSTER_ID}.git
+            git clone $GIT_SVC_HTTP://$(echo -n $TOKEN)@${GIT_SVC_BASE_URL}/${USERNAME}/${CLUSTER_ID}-manifests.git
+
+            cd ${CONTRACT_ID}
+            CONTRACT_COMMIT_ID=$(git rev-parse HEAD)
+            cd ..
+
+            # Get cluster-api infra provider in the template
+            INFRA_PROVIDER="$(cat ${CONTRACT_ID}/site/$TEMPLATE_NAME/tks-cluster/kustomization.yaml | grep /infra/ | awk -F \/ '{print $3}')"
+            echo ${INFRA_PROVIDER} | tee /mnt/out/infra_provider.txt
+
+            if [ "$INFRA_PROVIDER" = "aws" ]; then
+                eks_enabled=$(cat ${CONTRACT_ID}/site/$TEMPLATE_NAME/tks-cluster/site-values.yaml  | grep eksEnabled | awk '{print $2}')
+                echo $eks_enabled | tee /mnt/out/managed_cluster.txt
+            fi
+
+            cp -r ${CONTRACT_ID}/base ${CLUSTER_ID}/base
+            mkdir ${CLUSTER_ID}/site/
+            cp -r ${CONTRACT_ID}/site/${TEMPLATE_NAME} ${CLUSTER_ID}/site/${CLUSTER_ID}
+            cp -r ${CONTRACT_ID}/render.sh ${CLUSTER_ID}/render.sh
+
+            ## Replace site-values with fetched params ##
+            yq -i e ".global.clusterName=\"$CLUSTER_ID\"" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+
+            val_tksCpNode=$(echo $CLUSTER_INFO | jq -r '.tksCpNode')
+            val_tksInfraNode=$(echo $CLUSTER_INFO | jq -r '.tksInfraNode')
+            val_tksUserNode=$(echo $CLUSTER_INFO | jq -r '.tksUserNode')
+            yq -i e ".global.tksCpNode=$val_tksCpNode" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+            yq -i e ".global.tksInfraNode=$val_tksInfraNode" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+            yq -i e ".global.tksUserNode=$val_tksUserNode" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+
+            case $INFRA_PROVIDER in
+              aws)
+                ## Fetch cluster params from cluster_info file ##
+                val_ssh_key=$(echo $CLUSTER_INFO | jq -r '.sshKeyName')
+                val_region=$(echo $CLUSTER_INFO | jq -r '.clusterRegion')
+
+                val_tksInfraNodeMax=$(echo $CLUSTER_INFO | jq -r '.tksInfraNodeMax')
+                val_tksInfraNodeType=$(echo $CLUSTER_INFO | jq -r '.tksInfraNodeType')
+                val_tksUserNodeMax=$(echo $CLUSTER_INFO | jq -r '.tksUserNodeMax')
+                val_tksUserNodeType=$(echo $CLUSTER_INFO | jq -r '.tksUserNodeType')
+
+                yq -i e ".global.sshKeyName=\"$val_ssh_key\"" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                yq -i e ".global.clusterRegion=\"$val_region\"" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+
+                yq -i e ".global.tksInfraNodeMax=$val_tksInfraNodeMax" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                yq -i e ".global.tksInfraNodeType=\"$val_tksInfraNodeType\"" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                yq -i e ".global.tksUserNodeMax=$val_tksUserNodeMax" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                yq -i e ".global.tksUserNodeType=\"$val_tksUserNodeType\"" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+
+                ## multi-tenancy ##
+                if [ "$CLOUD_ACCOUNT_ID" = "NULL" ]; then
+                  sed -i '/multitenancyId/,+2d' $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                else
+                  yq -i e ".global.cloudAccountID=\"$CLOUD_ACCOUNT_ID\"" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                fi
+                ;;
+
+              byoh)
+                cluster_endpoint_host=$(echo $CLUSTER_INFO | jq -r '.byoClusterEndpointHost')
+                cluster_endpoint_port=$(echo $CLUSTER_INFO | jq -r '.byoClusterEndpointPort')
+                client_id=${CLUSTER_ID}-k8s-api
+
+                yq -i e ".global.clusterEndpointHost=\"$cluster_endpoint_host\"" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                yq -i e ".global.clusterEndpointPort=$cluster_endpoint_port" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                yq -i e ".global.keycloakIssuerUri=\"$KEYCLOAK_URL/realms/$CONTRACT_ID\"" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                yq -i e ".global.keycloakClientId=\"$client_id\"" $CLUSTER_ID/site/$CLUSTER_ID/tks-cluster/site-values.yaml
+                ;;
+
+              *)
+                echo "Error: wrong infra provider"
+                exit 1
+                ;;
+            esac
+
+            echo "Contract ID: "${CONTRACT_ID} > ${CLUSTER_ID}/META
+            echo "Contract Repo Commit: "${CONTRACT_COMMIT_ID} >> ${CLUSTER_ID}/META
+            echo "Template Name: "${TEMPLATE_NAME} >> ${CLUSTER_ID}/META
+
+            git config --global user.email "taco_support@sk.com"
+            git config --global user.name "SKTelecom TACO"
+
+            cd ${CLUSTER_ID}-manifests
+            touch README
+            git add README
+            git commit -m "add new ${CLUSTER_ID} site"
+            git branch -M main
+            git remote set-url origin $GIT_SVC_HTTP://$(echo -n $TOKEN)@${GIT_SVC_BASE_URL}/${USERNAME}/${CLUSTER_ID}-manifests
+            git remote -v
+            git push -u origin main
+            cd ..
+
+            cd ${CLUSTER_ID}
+            git add *
+            git commit -m "add new ${CLUSTER_ID} site"
+            git branch -M main
+            git remote set-url origin $GIT_SVC_HTTP://$(echo -n $TOKEN)@${GIT_SVC_BASE_URL}/${USERNAME}/${CLUSTER_ID}
+            git remote -v
+            git push -u origin main
+            cd ..
+
+        envFrom:
+          - secretRef:
+              name: "git-svc-token"
+
+        env:
+          - name: CONTRACT_ID
+            value: "{{workflow.parameters.contract_id}}"
+          - name: CLUSTER_ID
+            value: "{{workflow.parameters.cluster_id}}"
+          - name: TEMPLATE_NAME
+            value: "{{workflow.parameters.template_name}}"
+          - name: CLOUD_ACCOUNT_ID
+            value: "{{workflow.parameters.cloud_account_id}}"
+          - name: KEYCLOAK_URL
+            value: "{{workflow.parameters.keycloak_url}}"
+          - name: CLUSTER_INFO
+            value: "{{inputs.parameters.cluster_info}}"
+          - name: ARGO_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: gitea-webhook.service-account-token
+                key: token
+        volumeMounts:
+          - name: out
+            mountPath: /mnt/out
+      volumes:
+        - name: out
+          emptyDir: {}
+      outputs:
+        parameters:
+          - name: infra_provider
+            valueFrom:
+              default: "Something wrong"
+              path: /mnt/out/infra_provider.txt
+          - name: managed_cluster
+            valueFrom:
+              default: "false"
+              path: /mnt/out/managed_cluster.txt
+
+    - name: createRepoCredential
+      activeDeadlineSeconds: 120
+      container:
+        name: "createCredential"
+        image: harbor.taco-cat.xyz/tks/argocd-cli:v2.2.5
+        imagePullPolicy: IfNotPresent
+        command:
+          - /bin/bash
+          - -ecx
+          - |
+            echo "===== Connect github repo ${USERNAME}/${CLUSTER_ID}-manifests with token ====="
+            # log into Argo CD server
+            ./argocd login $ARGO_SERVER --plaintext --insecure --username $ARGO_USERNAME \
+            --password $ARGO_PASSWORD
+
+            GIT_SVC_HTTP=${GIT_SVC_URL%://*}
+            GIT_SVC_BASE_URL=${GIT_SVC_URL#*//}
+
+            ./argocd repo add $GIT_SVC_HTTP://$GIT_SVC_BASE_URL/${USERNAME}/${CLUSTER_ID}-manifests --username ${USERNAME} --password ${TOKEN}
+        envFrom:
+          - secretRef:
+              name: "git-svc-token"
+          - secretRef:
+              name: "decapod-argocd-config"
+        env:
+          - name: CLUSTER_ID
+            value: "{{workflow.parameters.cluster_id}}"
+
+    - name: main
+      inputs:
+        parameters:
+          - name: cluster_info
+      steps:
+        - - name: createClusterRepo
+            template: createClusterRepo
+            arguments:
+              parameters:
+                - name: cluster_info
+                  value: "{{inputs.parameters.cluster_info}}"
+
+        - - name: createRepoCredential
+            template: createRepoCredential
+            arguments: {}
+
+      outputs:
+        parameters:
+          - name: infra_provider
+            valueFrom:
+              parameter: "{{steps.createClusterRepo.outputs.parameters.infra_provider}}"
+          - name: managed_cluster
+            valueFrom:
+              parameter: "{{steps.createClusterRepo.outputs.parameters.managed_cluster}}"

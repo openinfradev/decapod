@@ -1,0 +1,92 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tks-create-contract-repo
+  namespace: argo
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+      - name: contract_id
+        value: "contract_uuid"
+      # Revision for decapod-base and decapod-site repo
+      - name: base_repo_branch
+        value: "main"
+      - name: keycloak_url
+        value: ""
+  templates:
+    - name: createContractRepo
+      activeDeadlineSeconds: 120
+      container:
+        name: "createRepo"
+        image: harbor.taco-cat.xyz/tks/ghcli-alpine:2.0.0
+        imagePullPolicy: IfNotPresent
+        command:
+          - /bin/bash
+          - -ecx
+          - |
+
+            function gh_create_repo() {
+                echo $TOKEN | gh auth login --with-token
+                echo "===== Current repo list ====="
+                gh repo list openinfradev | grep decapod-site
+                gh repo list ${USERNAME}
+
+                echo "===== Create and initialize ${USERNAME}/${CONTRACT_ID} site and manifests repositories ====="
+                gh repo create ${USERNAME}/${CONTRACT_ID} --public --confirm
+
+                cd ${CONTRACT_ID}
+                echo -n ${TOKEN} | gh secret set API_TOKEN_GITHUB
+            }
+
+            function gitea_create_repo() {
+                curl -X POST -H "content-type: application/json" -H "Authorization: token ${TOKEN}" --data '{"name": "'${CONTRACT_ID}'"}' $GIT_SVC_HTTP://${GIT_SVC_BASE_URL}/api/v1/orgs/${USERNAME}/repos
+            }
+
+            GIT_SVC_HTTP=${GIT_SVC_URL%://*}
+            GIT_SVC_BASE_URL=${GIT_SVC_URL#*//}
+
+            if [ "$GIT_SVC_TYPE" = "gitea" ];then
+                gitea_create_repo
+            else
+                gh_create_repo
+            fi
+
+            git clone -b ${REVISION} $GIT_SVC_HTTP://$(echo -n $TOKEN)@${GIT_SVC_BASE_URL}/${USERNAME}/decapod.git
+            cd decapod
+            echo "Decapod Repo Revision: "${REVISION} > META
+            echo "Decapod Repo Commit: "$(git rev-parse HEAD) >> META
+
+            site_list=$(ls -d site/*)
+            # Append Keycloak URL and Realm info
+            KEYCLOAK_DOMAIN="${KEYCLOAK_URL#https://}"
+            for site in ${site_list}
+            do
+              sed -i "/keycloakDomain:/c\  keycloakDomain: ${KEYCLOAK_DOMAIN}" ${site}/lma/site-values.yaml
+              sed -i "/realms:/c\  realms: ${CONTRACT_ID}" ${site}/lma/site-values.yaml
+            done
+
+            git config --global user.email "taco_support@sk.com"
+            git config --global user.name "SKTelecom TACO"
+            git add .
+            git commit -m "new contract: ${CONTRACT_ID}"
+
+            git remote add new_contract $GIT_SVC_HTTP://$(echo -n $TOKEN)@${GIT_SVC_BASE_URL}/${USERNAME}/${CONTRACT_ID}
+            git push new_contract ${REVISION}:main
+            cd ..
+
+        envFrom:
+          - secretRef:
+              name: "git-svc-token"
+        env:
+          - name: CONTRACT_ID
+            value: "{{workflow.parameters.contract_id}}"
+          - name: REVISION
+            value: "{{workflow.parameters.base_repo_branch}}"
+          - name: KEYCLOAK_URL
+            value: "{{workflow.parameters.keycloak_url}}"
+    - name: main
+      steps:
+        - - name: createContractRepository
+            template: createContractRepo
+            arguments: {}

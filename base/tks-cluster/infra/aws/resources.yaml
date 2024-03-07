@@ -1,0 +1,138 @@
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: cluster-api-aws
+  name: cluster-api-aws
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: cluster-api-aws
+    version: 0.10.1
+  releaseName: cluster-api-aws
+  targetNamespace: argo
+  values:
+    sshKeyName: TO_BE_FIXED
+    cluster:
+      name: TO_BE_FIXED
+      region: TO_BE_FIXED
+      kubernetesVersion: v1.25.9
+      podCidrBlocks:
+      - 192.168.0.0/16
+      bastion:
+        enabled: true
+        instanceType: t3.micro
+        allowedCIDRBlocks:
+        - 127.0.0.1/32
+        useSpotInstance:
+          enabled: true
+    kubeadmControlPlane:
+      replicas: 3
+      controlPlaneMachineType: TO_BE_FIXED
+      rootVolume:
+        size: 20 # GB
+        type: gp2
+    machinePool: []
+    machineDeployment: []
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: aws-ebs-csi-driver
+  name: aws-ebs-csi-driver
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: aws-ebs-csi-driver
+    version: 2.24.0
+  releaseName: aws-ebs-csi-driver
+  targetNamespace: kube-system
+  values:
+    image:
+      repository: harbor.taco-cat.xyz/tks/aws-ebs-csi-driver
+    sidecars:
+      provisioner:
+        image:
+          repository: harbor.taco-cat.xyz/tks/csi-provisioner
+      attacher:
+        image:
+          repository: harbor.taco-cat.xyz/tks/csi-attacher
+      snapshotter:
+        image:
+          repository: harbor.taco-cat.xyz/tks/csi-snapshotter
+      livenessProbe:
+        image:
+          repository: harbor.taco-cat.xyz/tks/livenessprobe
+      resizer:
+        image:
+          repository: harbor.taco-cat.xyz/tks/csi-resizer
+      nodeDriverRegistrar:
+        image:
+          repository: harbor.taco-cat.xyz/tks/csi-node-driver-registrar
+    snapshotterSidecarEnabled: true
+    storageClasses: 
+    - name: taco-storage
+      # annotation metadata
+      annotations:
+        storageclass.kubernetes.io/is-default-class: "true"
+      # label metadata
+      labels:
+        support: taco-apps
+      # defaults to WaitForFirstConsumer
+      volumeBindingMode: WaitForFirstConsumer
+      # defaults to Delete
+      reclaimPolicy: Delete
+      parameters:
+        encrypted: "true"
+
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: aws-ack-s3-crds
+  name: aws-ack-s3-crds
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: s3-chart
+    version: v1.0.3
+  releaseName: s3-chart-crds
+  targetNamespace: taco-system
+  values: {}
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: aws-ack-s3
+  name: aws-ack-s3
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: s3-chart 
+    version: v1.0.3
+  releaseName: s3-chart 
+  targetNamespace: taco-system
+  values:
+    image:
+      repository: harbor.taco-cat.xyz/tks/s3-controller  #public.ecr.aws/aws-controllers-k8s/s3-controller
+      tag: v1.0.3
+    aws:
+      region: ap-northeast-2
+    deployment:
+      nodeSelector:
+        kubernetes.io/os: linux
+        taco-lma: enabled

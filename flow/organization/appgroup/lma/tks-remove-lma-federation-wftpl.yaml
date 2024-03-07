@@ -1,0 +1,387 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tks-remove-lma-federation
+  namespace: argo
+spec:
+  entrypoint: removeLMA
+  arguments:
+    parameters:
+    - name: app_group
+      value: "lma"
+    - name: github_account
+      value: "decapod10"
+    - name: tks_api_url
+      value: "http://tks-api.tks.svc:9110"
+    - name: organization_id
+      value: "oxgpyp293"
+    - name: cluster_id
+      value: "ckdnejbhz"
+    - name: app_group_id
+      value: "a0ud54n4j"
+    - name: keycloak_url
+      value: "https://tks-console-dev.taco-cat.xyz"
+    - name: base_repo_branch
+      value: "release"
+    - name: cloud_account_id
+      value: ""
+    - name: object_store
+      value: "s3"
+
+    ##########################
+    # For removeLMA task #
+    ##########################
+    - name: app_prefix
+      value: "{{workflow.parameters.cluster_id}}"
+    - name: filter
+      value: "app={{workflow.parameters.cluster_id}}-{{workflow.parameters.app_group}}"
+  volumes:
+  - name: tks-proto-vol
+    configMap:
+      name: tks-proto
+  - name: kubeconfig-adm
+    secret:
+      secretName: tks-admin-kubeconfig-secret
+  templates:
+  - name: removeLMA
+    steps:
+    - - name: remove-keycloak-client
+        template: remove-keycloak-client
+        arguments:
+          parameters:
+          - name: organization_id
+            value: '{{workflow.parameters.organization_id}}'
+          - name: cluster_id
+            value: '{{workflow.parameters.cluster_id}}'
+          - name: keycloak_url
+            value: '{{workflow.parameters.keycloak_url}}'
+
+    - - name: get-clusters-in-contract
+        templateRef:
+          name: tks-primary-cluster
+          template: sub-get-cluster
+
+    - - name: remove-loki
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+          - name: app_name
+            value: "{{workflow.parameters.cluster_id}}-loki"
+        when: "{{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} == {{workflow.parameters.cluster_id}}"
+        continueOn:
+          failed: true
+
+    - - name: remove-objects-in-buckets
+        templateRef:
+          name: tks-primary-cluster
+          template: sub-remove-objects-in-buckets
+        when: >-
+            ( {{workflow.parameters.object_store}} == s3 ) && 
+            ( {{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} == {{workflow.parameters.cluster_id}} )
+
+    - - name: remove-lma-bucket
+        templateRef:
+          name: delete-apps
+          template: DeleteAppsByName
+        arguments:
+          parameters:
+          - name: app_name
+            value: "{{workflow.parameters.cluster_id}}-lma-bucket"
+        when: >-
+            ( {{workflow.parameters.object_store}} == s3 ) && 
+            ( {{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} == {{workflow.parameters.cluster_id}} )
+
+    - - name: removeAppGroup
+        templateRef:
+          name: remove-lma-federation
+          template: process
+
+    - - name: deleteNamespace
+        template: deleteNamespace
+        arguments:
+          parameters:
+            - name: target_namespace
+              value: "lma"
+
+    - - name: update-eps-for-thanos
+        templateRef:
+          name: tks-primary-cluster
+          template: update-eps-for-thanos
+        arguments:
+          parameters:
+          - name: primary_cluster
+            value: '{{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}}'
+          - name: member_clusters
+            value: '{{steps.get-clusters-in-contract.outputs.parameters.member_clusters}}'
+        when: >-
+            ( {{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} != '' ) && 
+            ( {{workflow.parameters.cluster_id}} != {{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} )
+
+    - - name: set-primary-cluster-on-tks-info
+        templateRef:
+          name: tks-primary-cluster
+          template: sub-set-primary-cluster-on-tks-info
+        arguments:
+          parameters:
+          - name: cluster_id
+            value: ""
+        when: "{{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} == {{workflow.parameters.cluster_id}}"
+
+  #######################
+  # Template Definition #
+  #######################
+  - name: deleteNamespace
+    inputs:
+      parameters:
+        - name: target_namespace
+    container:
+      name: delete-namespace
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          function log() {
+            level=$1
+            msg=$2
+            date=$(date '+%F %H:%M:%S')
+            echo "[$date] $level     $msg"
+          }
+
+          kube_params=""
+
+          if [[ -n "{{workflow.parameters.cluster_id}}" ]]; then
+            kube_secret=$(kubectl get secret -n {{workflow.parameters.cluster_id}} {{workflow.parameters.cluster_id}}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+            echo -e "kube_secret:\n$kube_secret" | head -n 5
+            cat <<< "$kube_secret" > /etc/kubeconfig
+
+            kube_params+="--kubeconfig=/etc/kubeconfig"
+          fi
+
+          kubectl $kube_params get ns ${TARGET_NAMESPACE}
+          if [[ $? =~ 0 ]]; then
+            kubectl $kube_params delete ns ${TARGET_NAMESPACE}
+            log "INFO" "${TARGET_NAMESPACE} was successfully deleted."
+          fi
+      env:
+        - name: TARGET_NAMESPACE
+          value: '{{inputs.parameters.target_namespace}}'
+    activeDeadlineSeconds: 900
+    retryStrategy:
+      limit: 2
+
+  - name: collectClusterList
+    inputs:
+      parameters:
+      - name: tks_api_url
+      - name: app_group_id
+    outputs:
+      parameters:
+      - name: outwards_cluster_list
+        valueFrom:
+          path: /mnt/out/cluster_list.txt
+    volumes:
+    - name: out
+      emptyDir: {}
+    script:
+      name: 'collect'
+      image: harbor.taco-cat.xyz/tks/centos-tks-api:v1.0
+      command: ["python"]
+      envFrom:
+      - secretRef:
+          name: "git-svc-token"
+      - secretRef:
+          name: "tks-api-secret"
+      volumeMounts:
+      - name: out
+        mountPath: /mnt/out
+      source: |
+        import sys
+        import os
+        import json
+        import git
+        import requests
+
+        TKS_API_URL = "{{workflow.parameters.tks_api_url}}"
+        CLUSTER_ID = "{{workflow.parameters.cluster_id}}"
+
+        def getToken() :
+            data = {
+                'organizationId' : os.environ['ORGANIZATION_ID'],
+                'accountId': os.environ['ACCOUNT_ID'],
+                'password' : os.environ['PASSWORD']
+            }
+
+            res = requests.post(TKS_API_URL+"/api/1.0/auth/login", json = data )
+            if res.status_code != 200 :
+                return ''
+            resJson = res.json()
+            return resJson['user']['token']
+
+        output_cluster_list = []
+        temp_map = {}
+        outwards_endpoint_map = {}
+
+        TOKEN=getToken()
+
+        res = requests.get(TKS_API_URL+"/api/1.0/clusters/" + CLUSTER_ID,
+            headers={"Authorization": "Bearer " + TOKEN} )
+        if res.status_code != 200 :
+            sys.exit('Failed to get cluster')
+
+        cluster = res.json()['cluster']
+        print( cluster )
+        organizationId = cluster['organizationId']
+        cur_cluster_name = cluster['id']
+
+        res = requests.get(TKS_API_URL+"/api/1.0/clusters?organizationId=" + organizationId,
+            headers={"Authorization": "Bearer " + TOKEN} )
+        if res.status_code != 200 :
+            sys.exit('Failed to get clusters')
+
+        clusters = res.json()['clusters']
+
+        print("Iterating over clusters in the same contract...")
+
+        # Iterate over cluster list except current cluster #
+        for cluster in clusters:
+            if cluster['status'] != "RUNNING":
+                continue
+
+            if cluster['id'] != CLUSTER_ID :
+                print("*******************************************")
+                print("Checking cluster: {}".format(cluster['id']))
+
+                gitBaseUrl = os.environ['GIT_SVC_URL'].replace("http://","")
+                print( gitBaseUrl )
+
+                print("Checking if corresponding cluster repo exists..")
+                url = "@" + gitBaseUrl + "/" + os.environ['USERNAME'] + "/" + cluster['id']
+                print( url )
+
+                repoUrl = "http://" + os.environ['TOKEN'] + url
+                try:
+                    repo = git.Repo.clone_from(repoUrl, './tempcluster')
+
+                except git.exc.GitCommandError as e:
+                    print(e)
+                    print("Repo {} doesn't exist. Skipping this 'cluster..".format(repoUrl))
+                    continue
+
+                res = requests.get(TKS_API_URL+"/api/1.0/app-groups?clusterId=" + cluster['id'],
+                    headers={"Authorization": "Bearer " + TOKEN} )
+                if res.status_code != 200 :
+                    print( 'Failed to get appgroups for cluster ')
+                    continue
+
+                appGroups = res.json()['appGroups']
+                print( appGroups )
+
+                os.system("rm -rf ./tempcluster")
+
+                # Check if LMA group exists.
+                for appGroup in appGroups:
+                    if appGroup['appGroupType'] == "LMA" :
+                        print("Found LMA appGroup: {}".format(appGroup['name']))
+
+                        # Add this cluster to outward list so that current ep is updated to this cluster
+                        temp_map["name"] = cluster['id']
+                        str_json = json.dumps(temp_map)
+                        output_cluster_list.append(str_json)
+
+
+        ###########################
+        # Construct output params #
+        ###########################
+        len_list = len(output_cluster_list)
+
+        with open("/mnt/out/cluster_list.txt", "w") as f:
+            f.write('[')
+
+            print("*** Outwards Cluster List ***")
+            for idx, item in enumerate(output_cluster_list, start=1):
+                print("item {}: {}".format(idx, item))
+                f.write(item.strip("'"))
+                if idx < len_list:
+                    f.write(',')
+            f.write(']')
+
+  - name: remove-keycloak-client
+    activeDeadlineSeconds: 300
+    inputs:
+      parameters:
+        - name: organization_id
+        - name: cluster_id
+        - name: keycloak_url
+    volumes:
+      - name: out
+        emptyDir: { }
+    container:
+      name: remove-keycloak-client
+      image: 'harbor.taco-cat.xyz/tks/shyaml_jq_yq_kubectl_python:3.11'
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          organization_id={{inputs.parameters.organization_id}}
+          cluster_id={{inputs.parameters.cluster_id}}
+          keycloak_url={{inputs.parameters.keycloak_url}}
+
+          #################
+          # Get endpoints
+          #################
+
+          kube_secret=$(kubectl get secret -n ${cluster_id} ${cluster_id}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+          cat <<< "$kube_secret" > kubeconfig
+
+          while ! kubectl --kubeconfig=kubeconfig get svc -n lma grafana --ignore-not-found; do
+            echo "Waiting for the grafana service to appear in cluster ${cluster_id} (5s)"
+            sleep 5
+          done
+
+          grafana_ep_secret=${kubectl get secret -n ${cluster_id} tks-endpoint-secret -o jsonpath='{.data.grafana}'| base64 -d }
+          if [ grafana_ep_secret == "" ]; then
+            while [ -z $(kubectl --kubeconfig=kubeconfig get svc -n lma grafana -o jsonpath="{.status.loadBalancer.ingress[*].hostname}") ]; do
+              if [ "$(kubectl --kubeconfig=kubeconfig get svc -n lma grafana -o jsonpath='{.spec.type}')" != "LoadBalancer" ]; then
+                log "FAIL" "A service for the grafana in ${cluster_id} is not configured properly.(No LoadBalancer)"
+                exit -1
+              fi
+
+              echo "Waiting for generating the loadbalancer of grafana(3s)"
+              sleep 3
+            done
+
+            endpoint=$(kubectl --kubeconfig=kubeconfig get svc -n lma grafana -o jsonpath="{.status.loadBalancer.ingress[0].hostname}")
+          else
+            endpoint=${grafana_ep_secret}
+          fi
+
+          # Login to keycloak
+          admin_password=$(kubectl get secret -n keycloak keycloak -o jsonpath="{.data.admin-password}" | base64 -d)
+          TOKEN=$(curl -s -k -X POST ${keycloak_url}/auth/realms/master/protocol/openid-connect/token -d grant_type=password -d username=admin -d password=${admin_password} -d client_id=admin-cli | jq -r '.access_token')
+
+          # Get client uuid
+          client_uuid=$(curl -s -k GET -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" ${keycloak_url}/auth/admin/realms/${organization_id}/clients\?\clientId\=grafana | jq -r ' .[] | {id} | .id')
+          if [ -z "$client_uuid" ]; then
+            echo "client already not exist"
+          else
+            JSON_DATA=$(curl -s -k GET -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" ${keycloak_url}/auth/admin/realms/${organization_id}/clients\?\clientId\=grafana)
+
+            MODIFIED_JSON=$(echo $JSON_DATA | jq --arg value1 "http://$endpoint/*" --arg value2 "https://$endpoint/*" '.[0] | { "redirectUris": (.redirectUris | map(select(. != $value1 and . != $value2))) }')
+
+            # Convert the array to a JSON array
+            num_redirect_uris=$(echo $MODIFIED_JSON | jq '.redirectUris | length')
+
+            if [ $num_redirect_uris -gt 0 ]; then
+                echo "$MODIFIED_JSON" > modified_data.json
+                curl -s -k -X PUT -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" -d @modified_data.json ${keycloak_url}/auth/admin/realms/${organization_id}/clients/${client_uuid}
+            else
+                # Remove client
+                curl -s -k -X DELETE -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" ${keycloak_url}/auth/admin/realms/${organization_id}/clients/${client_uuid}
+            fi
+          fi
+      envFrom:
+        - secretRef:
+            name: tks-api-secret

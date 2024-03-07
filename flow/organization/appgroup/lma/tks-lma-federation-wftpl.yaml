@@ -1,0 +1,512 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: tks-lma-federation
+  namespace: argo
+spec:
+  entrypoint: deployLMA
+  arguments:
+    parameters:
+    - name: site_name
+      value: "coyar0qx1"
+    - name: logging_component
+      value: "loki"
+    - name: object_store
+      value: "s3"
+    - name: github_account
+      value: "decapod10"
+    - name: manifest_repo_url
+      value: "https://github.com/decapod10/coyar0qx1-manifests"
+    - name: revision
+      value: "main"
+    - name: organization_id
+      value: "ovbxm7jvf"
+    - name: app_prefix
+      value: "{{workflow.parameters.site_name}}"
+    - name: keycloak_url
+      value: "https://tks-console-dev.taco-cat.xyz"
+    - name: console_url
+      value: "https://tks-console-dev.taco-cat.xyz"
+    - name: alert_tks
+      value: "https://tks-api-dev.taco-cat.xyz/system-api/1.0/alerts"
+    - name: alert_slack
+      value: "https://hooks.slack.com/services/fixme"
+    ##########################
+    # For tks-info task #
+    ##########################
+    - name: tks_api_url
+      value: "http://tks-api.tks.svc:9110"
+    - name: cluster_id
+      value: "coyar0qx1"
+    - name: app_group_id
+      value: "a4z9mqwew"
+    - name: base_repo_branch
+      value: develop
+    - name: cloud_account_id
+      value: ""
+
+  volumes:
+  - name: tks-proto-vol
+    configMap:
+      name: tks-proto
+  - name: kubeconfig-adm
+    secret:
+      secretName: tks-admin-kubeconfig-secret
+  templates:
+  - name: deployLMA
+    steps:
+    - - name: createNamespace
+        template: createNamespace
+        arguments:
+          parameters:
+          - name: target_namespace
+            value: lma
+
+    - - name: get-clusters-in-contract
+        templateRef:
+          name: tks-primary-cluster
+          template: sub-get-cluster
+
+    - - name: set-this-to-primary-cluster
+        templateRef:
+          name: tks-primary-cluster
+          template: set-primary-cluster
+        arguments:
+          parameters:
+          - name: primary_cluster
+            value: '{{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}}'
+          - name: member_clusters
+            value: '{{steps.get-clusters-in-contract.outputs.parameters.member_clusters}}'
+        when: >-
+            ( {{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} == ''
+            ) || (
+            {{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} == '{{workflow.parameters.cluster_id}}' )
+
+
+    - - name: organization-level-update
+        templateRef:
+          name: tks-primary-cluster
+          template: change-logging-target
+        arguments:
+          parameters:
+          - name: primary_cluster
+            value: '{{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}}'
+          - name: member_clusters
+            value: '{{workflow.parameters.cluster_id}}'
+        when: ( {{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} != '' ) && ( '{{workflow.parameters.cluster_id}}' != {{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}} )
+
+    - - name: is-accessable-to-etcd
+        template: isAccessableEtcd
+        arguments:
+          parameters:
+          - name: cluster_id
+            value: "{{workflow.parameters.cluster_id}}"
+
+    - - name: installApps
+        templateRef:
+          name: lma-federation
+          template: deploy
+        arguments:
+          parameters:
+          - name: is_mananged_cluster
+            value: "{{steps.is-accessable-to-etcd.outputs.parameters.managed_cluster}}"
+
+    - - name: update-eps-for-thanos
+        templateRef:
+          name: tks-primary-cluster
+          template: update-eps-for-thanos
+        arguments:
+          parameters:
+          - name: primary_cluster
+            value: '{{steps.get-clusters-in-contract.outputs.parameters.primary_cluster}}'
+          - name: member_clusters
+            value: '{{steps.get-clusters-in-contract.outputs.parameters.member_clusters}}'
+
+    - - name: create-keycloak-client
+        template: create-keycloak-client
+        arguments:
+          parameters:
+          - name: organization_id
+            value: '{{workflow.parameters.organization_id}}'
+          - name: cluster_id
+            value: '{{workflow.parameters.cluster_id}}'
+          - name: keycloak_url
+            value: '{{workflow.parameters.keycloak_url}}'
+
+    - - name: update-auth-oidc-grafana
+        template: update-auth-oidc-grafana
+        arguments:
+          parameters:
+          - name: organization_id
+            value: '{{workflow.parameters.organization_id}}'
+          - name: cluster_id
+            value: '{{workflow.parameters.cluster_id}}'
+          - name: console_url
+            value: '{{workflow.parameters.console_url}}'
+          - name: keycloak_client_secret
+            value: '{{steps.create-keycloak-client.outputs.parameters.keycloak_client_secret}}'
+          - name: grafana_endpoint
+            value: '{{steps.create-keycloak-client.outputs.parameters.grafana_endpoint}}'
+
+    - - name: update-appgroup-grafana-eps
+        templateRef:
+          name: tks-update-appgroup
+          template: updateTksAppGroup
+        arguments:
+          parameters:
+          - name: endpoint
+            value: '{{steps.create-keycloak-client.outputs.parameters.grafana_endpoint}}'
+          - name: app_type
+            value: GRAFANA
+
+    - - name: wait-for-rendering-to-finish
+        templateRef:
+          name: wait-for-rendering-to-finish
+          template: main
+        arguments:
+          parameters:
+          - name: cluster_id
+            value: "{{ workflow.parameters.github_account }}/{{workflow.parameters.cluster_id}}"
+        when: "{{steps.update-auth-oidc-grafana.outputs.parameters.is_changed}} == YES"
+
+    - - name: argocd-sync-wait
+        template: argocd-sync-wait
+        arguments:
+          parameters:
+          - name: cluster_id
+            value: '{{workflow.parameters.cluster_id}}'
+
+    - - name: grafana-restart
+        template: grafana-restart
+        arguments:
+          parameters:
+          - name: cluster_id
+            value: '{{workflow.parameters.cluster_id}}'
+
+  #######################
+  # Template Definition #
+  #######################
+  - name: createNamespace
+    inputs:
+      parameters:
+        - name: target_namespace
+    container:
+      name: create-namespace
+      image: harbor.taco-cat.xyz/tks/hyperkube:v1.18.6
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          function log() {
+            level=$1
+            msg=$2
+            date=$(date '+%F %H:%M:%S')
+            echo "[$date] $level     $msg"
+          }
+
+          kube_secret=$(kubectl get secret -n {{workflow.parameters.cluster_id}} {{workflow.parameters.cluster_id}}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+          echo -e "kube_secret:\n$kube_secret" | head -n 5
+          cat <<< "$kube_secret" > /etc/kubeconfig
+
+          kubectl --kubeconfig=/etc/kubeconfig get ns ${TARGET_NAMESPACE}
+          if [[ $? =~ 1 ]]; then
+            kubectl --kubeconfig=/etc/kubeconfig create ns ${TARGET_NAMESPACE}
+            kubectl --kubeconfig=/etc/kubeconfig label ns ${TARGET_NAMESPACE} name=${TARGET_NAMESPACE}
+            kubectl --kubeconfig=/etc/kubeconfig label ns ${TARGET_NAMESPACE} taco-tls=enabled
+            log "INFO" "${TARGET_NAMESPACE} successfully created."
+          fi
+      env:
+        - name: TARGET_NAMESPACE
+          value: '{{inputs.parameters.target_namespace}}'
+    activeDeadlineSeconds: 900
+    retryStrategy:
+      limit: 2
+
+  - name: isAccessableEtcd
+    inputs:
+      parameters:
+        - name: cluster_id
+    container:
+      name: cluster-init
+      image: harbor.taco-cat.xyz/tks/tks-cluster-init:v1.0.0
+      command:
+        - /bin/bash
+        - '-exc'
+        - |
+          cp /kube/value kubeconfig_adm
+          kube_secret=$(kubectl --kubeconfig=kubeconfig_adm get secret -n ${cluster_id} ${cluster_id}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+          cat <<< "$kube_secret" > kubeconfig
+
+          # check whether this workload cluster have control-plane
+          if [ $(kubectl --kubeconfig=kubeconfig get no | grep control-plane | wc -l) -gt 0 ]; then
+            echo false | tee /mnt/out/managed_cluster.txt
+          else
+            echo true | tee /mnt/out/managed_cluster.txt
+          fi
+
+      volumeMounts:
+      - name: kubeconfig-adm
+        mountPath: "/kube"
+      - name: out
+        mountPath: /mnt/out
+      env:
+      - name: cluster_id
+        value: "{{ inputs.parameters.cluster_id }}"
+    volumes:
+      - name: out
+        emptyDir: { }
+      - name: kubeconfig-adm
+        secret:
+          secretName: tks-admin-kubeconfig-secret
+    outputs:
+      parameters:
+      - name: managed_cluster
+        valueFrom:
+          default: "Something wrong"
+          path: /mnt/out/managed_cluster.txt
+
+  - name: create-keycloak-client
+    activeDeadlineSeconds: 600
+    inputs:
+      parameters:
+      - name: organization_id
+      - name: cluster_id
+      - name: keycloak_url
+    outputs:
+      parameters:
+        - name: keycloak_client_secret
+          valueFrom:
+            path: /mnt/out/keycloak_client_secret.txt
+        - name: grafana_endpoint
+          valueFrom:
+            path: /mnt/out/grafana_endpoint.txt
+    volumes:
+      - name: out
+        emptyDir: {}
+    container:
+      name: create-keycloak-client
+      image: 'harbor.taco-cat.xyz/tks/shyaml_jq_yq_kubectl_python:3.11'
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          function log() {
+            level=$1
+            msg=$2
+            date=$(date '+%F %H:%M:%S')
+            echo "[$date] $level     $msg"
+          }
+
+          organization_id={{inputs.parameters.organization_id}}
+          cluster_id={{inputs.parameters.cluster_id}}
+          keycloak_url={{inputs.parameters.keycloak_url}}
+
+          #################
+          # Get endpoints
+          #################
+          kube_secret=$(kubectl get secret -n ${cluster_id} ${cluster_id}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+          cat <<< "$kube_secret" > kubeconfig
+
+          while ! kubectl --kubeconfig=kubeconfig get svc -n lma grafana --ignore-not-found; do
+            echo "Waiting for the grafana service to appear in cluster ${cluster_id} (5s)"
+            sleep 5
+          done
+
+          grafana_ep_secret=$(kubectl get secret -n ${cluster_id} tks-endpoint-secret -o jsonpath='{.data.grafana}'| base64 -d )
+
+          if [[ ${grafana_ep_secret} == "" ]]; then
+            while [ -z $(kubectl --kubeconfig=kubeconfig get svc -n lma grafana -o jsonpath="{.status.loadBalancer.ingress[*].hostname}") ]; do
+              if [[ "$(kubectl --kubeconfig=kubeconfig get svc -n lma grafana -o jsonpath='{.spec.type}')" != "LoadBalancer" ]]; then
+                log "FAIL" "A service for the grafana in ${cluster_id} is not configured properly.(No LoadBalancer)"
+                exit -1
+              fi
+
+              echo "Waiting for generating the loadbalancer of grafana(3s)"
+              sleep 3
+            done
+
+            endpoint=$(kubectl --kubeconfig=kubeconfig get svc -n lma grafana -o jsonpath="{.status.loadBalancer.ingress[0].hostname}")
+          else
+            endpoint=${grafana_ep_secret}
+          fi
+
+          # Login to keycloak
+          admin_password=$(kubectl get secret -n keycloak keycloak -o jsonpath="{.data.admin-password}" | base64 -d)
+          TOKEN=$(curl -s -k -X POST ${keycloak_url}/auth/realms/master/protocol/openid-connect/token -d grant_type=password -d username=admin -d password=${admin_password} -d client_id=admin-cli | jq -r '.access_token')
+
+          client_uuid=$(curl -s -k GET -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" ${keycloak_url}/auth/admin/realms/${organization_id}/clients\?\clientId\=grafana | jq -r ' .[] | {id} | .id')
+          if [ -z "$client_uuid" ]; then
+            # Create client
+
+            printf '{
+                "clientId" : "grafana",
+                "directAccessGrantsEnabled": true,
+                "standardFlowEnabled": true
+            }\n' > client.json
+
+            curl -s -k POST -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" -d @client.json ${keycloak_url}/auth/admin/realms/${organization_id}/clients
+            client_uuid=$(curl -s -k GET -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" ${keycloak_url}/auth/admin/realms/${organization_id}/clients\?\clientId\=grafana | jq -r ' .[] | {id} | .id')
+          fi
+
+          JSON_DATA=$(curl -s -k GET -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" ${keycloak_url}/auth/admin/realms/${organization_id}/clients\?\clientId\=grafana)
+
+          # Convert the array to a JSON array
+          MODIFIED_JSON=$(echo "$JSON_DATA" | jq --arg endpoint1 "http://$endpoint/*" --arg endpoint2 "https://$endpoint/*" 'map(.redirectUris += [$endpoint1, $endpoint2] | {redirectUris: .redirectUris})')
+          MODIFIED_JSON=$(echo $MODIFIED_JSON | jq '.[0]')
+
+          # Write the JSON array to a new file
+          echo "$MODIFIED_JSON" > modified_data.json
+          curl -s -k -X PUT -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" -d @modified_data.json ${keycloak_url}/auth/admin/realms/${organization_id}/clients/${client_uuid}
+          secret=$(curl -s -k GET -H "Content-Type: application/json" -H "Authorization: Bearer $TOKEN" ${keycloak_url}/auth/admin/realms/${organization_id}/clients/${client_uuid}/client-secret | jq -r '.value')
+
+          echo ${secret} > /mnt/out/keycloak_client_secret.txt
+          echo ${endpoint} > /mnt/out/grafana_endpoint.txt
+
+      envFrom:
+        - secretRef:
+            name: tks-api-secret
+      volumeMounts:
+        - name: out
+          mountPath: /mnt/out
+
+  - name: update-auth-oidc-grafana
+    inputs:
+      parameters:
+        - name: organization_id
+        - name: cluster_id
+        - name: keycloak_client_secret
+        - name: grafana_endpoint
+        - name: console_url
+
+    container:
+      name: update-auth-oidc-grafana
+      image: 'harbor.taco-cat.xyz/tks/shyaml_jq_yq_kubectl_python:3.11'
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          function log() {
+            level=$1
+            msg=$2
+            date=$(date '+%F %H:%M:%S')
+            echo "[$date] $level     $msg"
+          }
+
+          organization_id={{inputs.parameters.organization_id}}
+          cluster_id={{inputs.parameters.cluster_id}}
+          keycloak_client_secret={{inputs.parameters.keycloak_client_secret}}
+          grafana_endpoint={{inputs.parameters.grafana_endpoint}}
+
+          #################
+          # updates
+          #################
+          GIT_ACCOUNT={{workflow.parameters.github_account}}
+          if  [[ $GIT_SVC_URL == https://* ]]; then
+            repository_base=https://${TOKEN//[$'\t\r\n ']}@${GIT_SVC_URL/http:\/\//}/${GIT_ACCOUNT}/
+          else
+            repository_base=http://${TOKEN//[$'\t\r\n ']}@${GIT_SVC_URL/http:\/\//}/${GIT_ACCOUNT}/
+          fi
+
+          GIT_SVC_HTTP=${GIT_SVC_URL%://*}
+          GIT_SVC_BASE_URL=${GIT_SVC_URL#*//}
+          git clone $GIT_SVC_HTTP://$(echo -n $TOKEN)@${GIT_SVC_BASE_URL}/${USERNAME}/${cluster_id}.git
+          cd ${cluster_id}
+
+          # Update grafana client secret
+          yq -i e  ".global.grafanaDomain=\"${grafana_endpoint}\"" ${cluster_id}/lma/site-values.yaml
+          yq -i e  ".global.grafanaClientSecret=\"${keycloak_client_secret}\"" ${cluster_id}/lma/site-values.yaml
+          yq -i e  ".global.consoleUrl=\"${console_url}\"" ${cluster_id}/lma/site-values.yaml
+
+          if [[ `git status --porcelain` ]]; then
+            git config --global user.name "tks"
+            git config --global user.email "tks@sktelecom.com"
+
+            log "INFO" "##### commit changes grafana domain and root_url on ${cluster_id} to ${grafana_endpoint} and ${grafana_endpoint}/grafana"
+            cmessage="changes grafana domain and root_url on ${cluster_id} to ${grafana_endpoint} and ${grafana_endpoint}/grafana"
+            git add ${cluster_id}/lma/site-values.yaml
+            git commit -m "change values on grafana.ini.server." -m "$cmessage"
+            git push
+            echo "YES" > /mnt/out/changed.txt
+          fi
+
+      envFrom:
+        - secretRef:
+            name: "git-svc-token"
+        - secretRef:
+            name: "tks-api-secret"
+      volumeMounts:
+      - name: out
+        mountPath: /mnt/out
+    volumes:
+    - name: out
+      emptyDir: {}
+    outputs:
+      parameters:
+      - name: is_changed
+        valueFrom:
+          path: /mnt/out/changed.txt
+          default: "NO"
+
+  - name: argocd-sync-wait
+    inputs:
+      parameters:
+        - name: cluster_id
+    container:
+      name: argocd-sync-wait
+      image: harbor.taco-cat.xyz/tks/argocd-cli:v2.2.5
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          # log into Argo CD server
+          ./argocd login $ARGO_SERVER --plaintext --insecure --username $ARGO_USERNAME \
+          --password $ARGO_PASSWORD
+          
+          app_name={{inputs.parameters.cluster_id}}-grafana
+          
+          # sync app
+          echo "sync app $app_name"
+          ./argocd app sync $app_name
+          
+          # wait for sync
+          ./argocd app wait $app_name --sync 
+
+      envFrom:
+        - secretRef:
+            name: "decapod-argocd-config"
+    activeDeadlineSeconds: 900
+
+  - name: grafana-restart
+    inputs:
+      parameters:
+        - name: cluster_id
+    container:
+      name: grafana-restart
+      image: 'harbor.taco-cat.xyz/tks/shyaml_jq_yq_kubectl_python:3.11'
+      command:
+        - /bin/bash
+        - '-c'
+        - |
+          function log() {
+            level=$1
+            msg=$2
+            date=$(date '+%F %H:%M:%S')
+            echo "[$date] $level     $msg"
+          }
+
+          cluster_id={{inputs.parameters.cluster_id}}
+
+          kube_secret=$(kubectl get secret -n ${cluster_id} ${cluster_id}-tks-kubeconfig -o jsonpath="{.data.value}" | base64 -d)
+          cat <<< "$kube_secret" > kubeconfig
+          pods=$(kubectl --kubeconfig kubeconfig get pods -n lma | grep grafana | awk '{print $1}')
+  
+          for pod in $pods
+          do
+            echo "Deleting pod $pod"
+            kubectl --kubeconfig kubeconfig delete pod $pod -n lma --ignore-not-found=true
+          done
+
+      envFrom:
+        - secretRef:
+            name: tks-api-secret
+    activeDeadlineSeconds: 900

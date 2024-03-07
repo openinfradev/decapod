@@ -1,0 +1,146 @@
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: db-secret-argo
+  name: db-secret-argo
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: prepare-decapod-controller
+    version: 0.1.0
+  releaseName: db-secret-argo
+  targetNamespace: argo
+  values:
+    postgres:
+      secretName: argo-postgres-config
+      username: postgres
+      password: secretPassword
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: db-secret-decapod-db
+  name: db-secret-decapod-db
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: prepare-decapod-controller
+    version: 0.1.0
+  releaseName: db-secret-decapod-db
+  targetNamespace: decapod-db
+  values:
+    postgres:
+      secretName: argo-postgres-config
+      username: postgres
+      password: secretPassword
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: postgresql
+  name: postgresql
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: postgresql
+    version: 12.1.2
+  releaseName: postgresql
+  targetNamespace: decapod-db
+  values:
+    # This secret name should be same as the one created by prepare-decapod-controller chart
+    existingSecret: argo-postgres-config
+    postgresqlConfiguration: {"listen_addresses": '*'}
+    ##########################################################################
+    # NOTE: This doesn't seem to be necessary at init time.                  #
+    # Just leave it in case it's necessary for connection from argo-wf later #
+    ##########################################################################
+    #pgHbaConfiguration: |-
+    #  host all all 127.0.0.1/32 password
+    #  host all all 10.233.0.1/16 password
+    postgresqlDatabase: postgres
+    persistence:
+      storageClass: "taco-storage"
+      size: 10Gi
+  wait: true
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: argo-workflows-operator-crds
+  name: argo-workflows-operator-crds
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: argo-workflows
+    version: 0.2.6
+  releaseName: argo-workflows-operator-crds
+  targetNamespace: argo
+  values: {}
+---
+apiVersion: helm.fluxcd.io/v1
+kind: HelmRelease
+metadata:
+  labels:
+    name: argo-workflows-operator
+  name: argo-workflows-operator
+spec:
+  helmVersion: v3
+  chart:
+    type: helmrepo
+    repository: https://harbor.taco-cat.xyz/chartrepo/tks
+    name: argo-workflows
+    version: 0.2.6
+  releaseName: argo-workflows-operator
+  targetNamespace: argo
+  values:
+    server:
+      serviceType: NodePort
+      image:
+        registry: harbor.taco-cat.xyz
+        repository: tks/argocli
+        tag: v3.2.6
+      extraArgs:
+        - "--auth-mode=server"
+    controller:
+      containerRuntimeExecutor: k8sapi
+      image:
+        registry: harbor.taco-cat.xyz
+        repository: tks/workflow-controller
+        tag: v3.2.6
+      persistence:
+        nodeStatusOffLoad: true
+        archive: true
+        postgresql:
+          host: postgresql.decapod-db # Set this to postgresql pod's service name
+          port: 5432
+          database: postgres
+          tableName: argo_workflows
+          # This secret name should be same as the one created by prepare-decapod-controller chart
+          # In addition, the secrets must be in the same namespace of the controller
+          userNameSecret:
+            name: argo-postgres-config
+            key: postgresql-username
+          passwordSecret:
+            name: argo-postgres-config
+            key: postgresql-password
+    executor:
+      image:
+        registry: harbor.taco-cat.xyz
+        repository: tks/argoexec
+        tag: v3.2.6
+  wait: true
