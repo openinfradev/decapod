@@ -560,8 +560,8 @@ spec:
             metadata:
               name: taco-storage
             parameters:
-              fsType: ext4
-              type: gp2
+              csi.storage.k8s.io/fstype: ext4
+              type: gp3
             provisioner: kubernetes.io/aws-ebs
             reclaimPolicy: Delete
             volumeBindingMode: WaitForFirstConsumer

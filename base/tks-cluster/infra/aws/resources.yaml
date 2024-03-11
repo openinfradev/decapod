@@ -34,7 +34,7 @@ spec:
       controlPlaneMachineType: TO_BE_FIXED
       rootVolume:
         size: 20 # GB
-        type: gp2
+        type: gp3
     machinePool: []
     machineDeployment: []
   wait: true
@@ -77,20 +77,22 @@ spec:
         image:
           repository: harbor.taco-cat.xyz/tks/csi-node-driver-registrar
     snapshotterSidecarEnabled: true
-    storageClasses: 
-    - name: taco-storage
-      # annotation metadata
-      annotations:
-        storageclass.kubernetes.io/is-default-class: "true"
-      # label metadata
-      labels:
-        support: taco-apps
-      # defaults to WaitForFirstConsumer
-      volumeBindingMode: WaitForFirstConsumer
-      # defaults to Delete
-      reclaimPolicy: Delete
-      parameters:
-        encrypted: "true"
+    storageClasses:
+      - name: taco-storage
+        # annotation metadata
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+        # label metadata
+        labels:
+          support: taco-apps
+        # defaults to WaitForFirstConsumer
+        volumeBindingMode: WaitForFirstConsumer
+        # defaults to Delete
+        reclaimPolicy: Delete
+        parameters:
+          encrypted: "true"
+          csi.storage.k8s.io/fstype: ext4
+          type: gp3
 
   wait: true
 ---

@@ -62,7 +62,7 @@ charts:
       maxSize: $(tksInfraNodeMax)
       rootVolume:
         size: 200
-        type: gp2
+        type: gp3
       labels:
         taco-lma: enabled
         servicemesh: enabled
@@ -79,7 +79,7 @@ charts:
       machineType: $(tksUserNodeType)
       rootVolume:
         size: 50
-        type: gp2
+        type: gp3
 
 - name: ingress-nginx
   override:
